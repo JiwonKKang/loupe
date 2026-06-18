@@ -664,3 +664,56 @@ fn e2e_new_file_is_single_card() {
     assert!(b_cards[0].summary.starts_with("Adds"));
     assert_all_summaries_nonempty(&data.cards);
 }
+
+// ---------------------------------------------------------------------------
+// (e) list_branches on a real tempfile mini repo
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_branches_finds_branches_current_and_default() {
+    use git2::{Repository, Signature};
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let sig = Signature::now("Tester", "tester@example.com").unwrap();
+
+    // One commit, then pin "main" and add a "feature" branch off it.
+    fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+    let base_oid = {
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap()
+    };
+    let base_commit = repo.find_commit(base_oid).unwrap();
+    repo.branch("main", &base_commit, true).unwrap();
+    repo.branch("feature", &base_commit, false).unwrap();
+    // Park HEAD on "feature" so `current` is well-defined and not the default.
+    repo.set_head("refs/heads/feature").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+
+    let out = super::list_branches(dir.path().to_str().unwrap()).unwrap();
+
+    // Both local branches present (init may also leave a default branch behind;
+    // assert membership rather than exact length to stay config-independent).
+    assert!(out.branches.iter().any(|b| b == "main"), "got {:?}", out.branches);
+    assert!(out.branches.iter().any(|b| b == "feature"), "got {:?}", out.branches);
+    // HEAD is on feature.
+    assert_eq!(out.current.as_deref(), Some("feature"));
+    // main exists => default base is main.
+    assert_eq!(out.default.as_deref(), Some("main"));
+    // current sorts first.
+    assert_eq!(out.branches.first().map(String::as_str), Some("feature"));
+}
+
+#[test]
+fn list_branches_errors_on_non_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    // An empty temp dir is not a git repo => Err (surfaced as String to the UI).
+    assert!(super::list_branches(dir.path().to_str().unwrap()).is_err());
+}

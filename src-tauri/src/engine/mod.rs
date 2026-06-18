@@ -6,11 +6,16 @@
 //! `build_review` is Tauri-independent (a pure function) so it can be called
 //! directly from `cargo test`.
 
+mod branches;
 mod cards;
 mod gitdiff;
 mod model;
 mod symbols;
 
+pub use branches::list_branches;
+// Re-exported for downstream/testing consumers of the contract type.
+#[allow(unused_imports)]
+pub use branches::Branches;
 pub use model::ReviewData;
 // Re-exported for downstream/testing consumers of the contract types.
 #[allow(unused_imports)]
