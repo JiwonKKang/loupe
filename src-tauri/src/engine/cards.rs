@@ -40,14 +40,24 @@ pub fn build_file_cards(file: &FileDiff, symbols: &[Symbol], out: &mut Vec<Revie
         return;
     }
 
-    // Attribute each *changed line* (not hunk — M10) to its innermost symbol.
+    // Attribute each diff line (not hunk — M10) to its innermost symbol. ctx lines
+    // are attributed too (so a symbol card can render leading/trailing context), and
     // del lines anchor to the preceding ctx line's new coordinate (M9).
     let attribution = attribute_changes(&file.lines, symbols);
 
-    // Which symbols actually have a change?
+    // Which symbols actually have a *change*? A symbol is "changed" only if an add or
+    // del line is attributed to it — never on ctx alone. git diff emits context_lines
+    // (3) around every hunk, so an unchanged symbol adjacent to a real change would
+    // otherwise be attributed via those ctx lines and become a spurious "+0 −0" card.
+    // ctx still rides along as display context inside a genuinely-changed symbol's
+    // card, it just never grants card-worthiness on its own (core invariant).
     let mut changed_symbol_idxs: Vec<usize> = attribution
         .iter()
-        .filter_map(|a| *a)
+        .zip(file.lines.iter())
+        .filter_map(|(a, l)| match (a, l.kind) {
+            (Some(idx), LineKind::Add | LineKind::Del) => Some(*idx),
+            _ => None,
+        })
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -77,8 +87,16 @@ pub fn build_file_cards(file: &FileDiff, symbols: &[Symbol], out: &mut Vec<Revie
         return;
     }
 
-    // 0 or 1 changed symbols => one whole-file card.
-    out.push(whole_file_card(file));
+    // 0 or 1 changed symbols => one whole-file card. Defensive: git only emits files
+    // that actually changed, but never emit a "+0 −0" whole-file card if (somehow) the
+    // file carries only ctx lines — the no-empty-change-card invariant holds here too.
+    let file_has_change = file
+        .lines
+        .iter()
+        .any(|l| matches!(l.kind, LineKind::Add | LineKind::Del));
+    if file_has_change {
+        out.push(whole_file_card(file));
+    }
 }
 
 /// For each diff line, the index of the symbol it belongs to (None = outside any
@@ -191,7 +209,17 @@ fn push_symbol_cards(
         return;
     }
 
-    let runs = contiguous_runs(&file.lines, &idxs);
+    // Keep only runs that carry a real change. A run that is ctx-only (e.g. trailing
+    // context of an earlier hunk that landed in a separate contiguous run) must not
+    // become a "+0 −0" card — the same invariant as at the symbol level, enforced per
+    // run. ctx still rides along inside change-bearing runs as display context.
+    let runs: Vec<Vec<usize>> = contiguous_runs(&file.lines, &idxs)
+        .into_iter()
+        .filter(|run| {
+            run.iter()
+                .any(|&i| matches!(file.lines[i].kind, LineKind::Add | LineKind::Del))
+        })
+        .collect();
     let multi = runs.len() > 1;
 
     for run in &runs {

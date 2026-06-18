@@ -138,6 +138,35 @@ fn assert_all_summaries_nonempty(cards: &[ReviewCard]) {
     }
 }
 
+/// Core invariant: every card carries at least one add or del line. A ctx-only card
+/// (e.g. an unchanged symbol pulled in by a hunk's surrounding context_lines) is a
+/// "+0 −0" empty card and must never be produced.
+fn assert_no_empty_change_cards(cards: &[ReviewCard]) {
+    for c in cards {
+        // Binary file cards legitimately have no lines (summary only); skip those.
+        if c.lines.is_empty() {
+            continue;
+        }
+        let adds = c.lines.iter().filter(|l| l.t == T_ADD).count();
+        let dels = c.lines.iter().filter(|l| l.t == T_DEL).count();
+        assert!(
+            adds + dels >= 1,
+            "card {} is ctx-only (+{} −{}) — empty change card: {:?}",
+            c.id,
+            adds,
+            dels,
+            c.lines.iter().map(|l| (l.t, l.c.as_str())).collect::<Vec<_>>()
+        );
+        // And the summary must not advertise a zero change.
+        assert!(
+            !c.summary.contains("+0 −0"),
+            "card {} summary advertises a zero change: {:?}",
+            c.id,
+            c.summary
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // (b) + (c) card split / fallback / deleted / new file
 // ---------------------------------------------------------------------------
@@ -386,6 +415,143 @@ fn del_anchored_to_innermost_symbol_via_preceding_ctx() {
     assert!(b.lines.iter().any(|l| l.c == "old b body" && l.t == T_DEL));
     // No cross-contamination.
     assert!(!a.lines.iter().any(|l| l.c == "old b body"));
+    assert_no_empty_change_cards(&out);
+    assert_all_summaries_nonempty(&out);
+}
+
+#[test]
+fn ctx_only_neighbors_of_a_change_do_not_become_cards() {
+    // Regression (dearday: src/lib.rs init_tracing/error became "+0 −0" cards).
+    // git emits context_lines(3) around every hunk, so a change confined to ONE
+    // function spills ctx lines into the adjacent functions. Those ctx-only neighbors
+    // must NOT be treated as changed symbols => exactly one card for the real change.
+    //
+    // Layout (new-coord rows, 0-base):
+    //   prev   : 0..=4   (fully unchanged neighbor above; only its tail is ctx)
+    //   middle : 6..=10  (the ONLY function with a real add)
+    //   next   : 12..=16 (fully unchanged neighbor below; only its head is ctx)
+    let symbols = vec![sym("prev", 0, 4), sym("middle", 6, 10), sym("next", 12, 16)];
+    let file = FileDiff {
+        new_path: "src/lib.rs".into(),
+        old_path: "src/lib.rs".into(),
+        new_source: String::new(),
+        old_source: String::new(),
+        status: FileStatus::Modified,
+        is_binary: false,
+        lines: vec![
+            // trailing 3 ctx lines of `prev` (the hunk's leading context)
+            line(LineKind::Ctx, Some(3), Some(3), "    // prev body"),
+            line(LineKind::Ctx, Some(4), Some(4), "    prev_call();"),
+            line(LineKind::Ctx, Some(5), Some(5), "}"),
+            // `middle` — the real change
+            line(LineKind::Ctx, Some(7), Some(7), "fn middle() {"),
+            line(LineKind::Add, Some(8), None, "    middle_new();"),
+            line(LineKind::Ctx, Some(9), Some(8), "    middle_body();"),
+            line(LineKind::Ctx, Some(10), Some(9), "}"),
+            // leading 3 ctx lines of `next` (the hunk's trailing context)
+            line(LineKind::Ctx, Some(13), Some(12), "fn next() {"),
+            line(LineKind::Ctx, Some(14), Some(13), "    next_body();"),
+            line(LineKind::Ctx, Some(15), Some(14), "    next_call();"),
+        ],
+    };
+    let mut out = Vec::new();
+    build_file_cards(&file, &symbols, &mut out);
+
+    // Only one symbol actually changed => 0/1 changed-symbol path => one whole-file
+    // card. The crucial assertion is that `prev`/`next` never produced ctx-only cards.
+    assert!(
+        !out.iter().any(|c| c.symbol == "prev" || c.symbol == "next"),
+        "ctx-only neighbors must not become cards: {:?}",
+        out.iter().map(|c| (c.symbol.as_str(), c.summary.as_str())).collect::<Vec<_>>()
+    );
+    assert_no_empty_change_cards(&out);
+    assert_all_summaries_nonempty(&out);
+}
+
+#[test]
+fn changed_symbol_card_with_ctx_neighbors_excludes_neighbors() {
+    // Two functions genuinely change, and a third (ctx-only neighbor) sits between
+    // their hunks' context. We must get exactly 2 per-symbol cards (foo, bar) and the
+    // ctx-only neighbor must be excluded — proving ctx alone never grants a card even
+    // on the >=2-changed-symbols path. ctx is still preserved INSIDE the real cards.
+    let symbols = vec![sym("foo", 0, 2), sym("mid", 4, 6), sym("bar", 8, 10)];
+    let file = FileDiff {
+        new_path: "pkg/n.go".into(),
+        old_path: "pkg/n.go".into(),
+        new_source: String::new(),
+        old_source: String::new(),
+        status: FileStatus::Modified,
+        is_binary: false,
+        lines: vec![
+            // foo: real change + its own ctx
+            line(LineKind::Ctx, Some(1), Some(1), "func foo() {"),
+            line(LineKind::Add, Some(2), None, "\tfoo_new()"),
+            line(LineKind::Ctx, Some(3), Some(2), "}"),
+            // mid: ctx-only (it is between the two hunks' context)
+            line(LineKind::Ctx, Some(5), Some(4), "func mid() {"),
+            line(LineKind::Ctx, Some(6), Some(5), "}"),
+            // bar: real change + its own ctx
+            line(LineKind::Ctx, Some(9), Some(8), "func bar() {"),
+            line(LineKind::Add, Some(10), None, "\tbar_new()"),
+            line(LineKind::Ctx, Some(11), Some(9), "}"),
+        ],
+    };
+    let mut out = Vec::new();
+    build_file_cards(&file, &symbols, &mut out);
+
+    let names: Vec<&str> = out.iter().map(|c| c.symbol.as_str()).collect();
+    assert_eq!(out.len(), 2, "exactly foo + bar, got {names:?}");
+    assert!(names.contains(&"foo") && names.contains(&"bar"), "got {names:?}");
+    assert!(!names.contains(&"mid"), "ctx-only neighbor must be excluded: {names:?}");
+    // ctx is still preserved as display context inside the real card.
+    let foo = out.iter().find(|c| c.symbol == "foo").unwrap();
+    assert!(foo.lines.iter().any(|l| l.c == "func foo() {" && l.t == T_CTX));
+    assert!(foo.lines.iter().any(|l| l.c == "\tfoo_new()" && l.t == T_ADD));
+    assert_no_empty_change_cards(&out);
+    assert_all_summaries_nonempty(&out);
+}
+
+#[test]
+fn ctx_only_run_within_a_changed_symbol_is_dropped() {
+    // A wide symbol changes in ONE place but git's context for an UNRELATED later hunk
+    // (in a second symbol) lands a stray ctx run on the wide symbol via a coord gap.
+    // The wide symbol is genuinely changed (one add), so it makes a card — but the
+    // ctx-only run must be dropped, never emitted as a separate "+0 −0" run card.
+    let symbols = vec![sym("wide", 0, 50), sym("other", 60, 62)];
+    let file = FileDiff {
+        new_path: "pkg/w.go".into(),
+        old_path: "pkg/w.go".into(),
+        new_source: String::new(),
+        old_source: String::new(),
+        status: FileStatus::Modified,
+        is_binary: false,
+        lines: vec![
+            // real change in `wide` near the top
+            line(LineKind::Ctx, Some(10), Some(10), "ctx top"),
+            line(LineKind::Add, Some(11), None, "added top"),
+            line(LineKind::Ctx, Some(12), Some(11), "ctx top2"),
+            // a stray ctx-only run still inside `wide` far below (coord jump => new run)
+            line(LineKind::Ctx, Some(45), Some(44), "ctx far"),
+            line(LineKind::Ctx, Some(46), Some(45), "ctx far2"),
+            // real change in `other` so the >=2-symbol split path runs
+            line(LineKind::Ctx, Some(61), Some(58), "func other() {"),
+            line(LineKind::Add, Some(62), None, "added other"),
+        ],
+    };
+    let mut out = Vec::new();
+    build_file_cards(&file, &symbols, &mut out);
+
+    let wide_cards: Vec<_> = out.iter().filter(|c| c.symbol == "wide").collect();
+    assert_eq!(
+        wide_cards.len(),
+        1,
+        "the ctx-only run must be dropped => one wide card, got {:?}",
+        out.iter().map(|c| (c.id.as_str(), c.summary.as_str())).collect::<Vec<_>>()
+    );
+    // The surviving wide card carries the real add (and its local ctx).
+    assert!(wide_cards[0].lines.iter().any(|l| l.c == "added top" && l.t == T_ADD));
+    assert!(!wide_cards[0].lines.iter().any(|l| l.c == "ctx far"));
+    assert_no_empty_change_cards(&out);
     assert_all_summaries_nonempty(&out);
 }
 
@@ -602,6 +768,7 @@ fn e2e_mini_go_repo_two_commits() {
     let add_card = data.cards.iter().find(|c| c.symbol == "Add").unwrap();
     assert!(add_card.lines.iter().any(|l| l.c.contains("a + b + 0") && l.t == T_ADD));
     assert_eq!(add_card.path, "main.go");
+    assert_no_empty_change_cards(&data.cards);
     assert_all_summaries_nonempty(&data.cards);
 
     // Every line uses one of the three kinds, no trailing newlines.
