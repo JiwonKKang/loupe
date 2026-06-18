@@ -1,0 +1,43 @@
+/* Loupe — Spacing, radii, shadows
+   The system is built on air. The base step is generous (8px) and the
+   card sits in a wide, empty canvas. Radii are macOS-soft; shadows are
+   diffuse and dark, never harsh. */
+
+:root {
+  /* ---- Spacing scale (4px base, generous steps) ---- */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  24px;
+  --space-6:  32px;
+  --space-7:  48px;
+  --space-8:  64px;
+  --space-9:  96px;
+  --space-10: 128px;
+
+  /* ---- Semantic spacing ---- */
+  --gutter-card:   40px;   /* inner padding of the review card     */
+  --canvas-pad:    72px;   /* breathing room around the card       */
+  --rail-width:    14px;   /* the queue spine at rest (just dots)  */
+  --rail-open:     280px;  /* the queue rail expanded on hover     */
+
+  /* ---- Radii (macOS-soft) ---- */
+  --radius-sm:   6px;
+  --radius-md:   10px;
+  --radius-lg:   14px;
+  --radius-xl:   18px;
+  --radius-card: 16px;
+  --radius-pill: 999px;
+
+  /* ---- Shadows — diffuse, dark, layered ---- */
+  --shadow-sm:    0 1px 2px rgba(0, 0, 0, 0.40);
+  --shadow-card:  0 1px 2px rgba(0, 0, 0, 0.45), 0 10px 34px rgba(0, 0, 0, 0.38);
+  --shadow-focus: 0 2px 4px rgba(0, 0, 0, 0.45), 0 24px 70px rgba(0, 0, 0, 0.55),
+                  0 0 0 1px var(--border-subtle);
+  --shadow-pop:   0 14px 48px rgba(0, 0, 0, 0.55);
+
+  /* ---- Dim — how far un-focused chrome recedes ---- */
+  --dim-rest:    0.34;   /* @kind other */ /* rails / toolbar when card has focus */
+  --dim-deep:    0.18;   /* @kind other */ /* fully receded */
+}

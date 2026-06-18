@@ -1,0 +1,65 @@
+/* Loupe — Color tokens
+   Dark mode is the only mode. Calm, cool-tinted near-blacks with a
+   single interaction accent (indigo) and two semantic accents:
+   Pass (green) and Flag (amber). Everything else stays neutral. */
+
+:root {
+  /* ---- Base neutrals (raise as you come toward the viewer) ---- */
+  --bg-sunken:        #08090b;   /* deepest wells, behind the canvas   */
+  --bg-base:          #0c0d10;   /* the empty canvas — the app body    */
+  --bg-raised:        #131519;   /* rails, toolbars, sunken panels     */
+  --surface-card:     #16181d;   /* the focused review card            */
+  --surface-overlay:  #1c1f25;   /* popovers, menus, threads           */
+  --surface-inset:    #101216;   /* code wells inside a card           */
+
+  /* ---- Hairlines ---- */
+  --border-subtle:    rgba(255, 255, 255, 0.06);
+  --border-default:   rgba(255, 255, 255, 0.10);
+  --border-strong:    rgba(255, 255, 255, 0.16);
+
+  /* ---- Text ---- */
+  --text-primary:     #ECEDEF;
+  --text-secondary:   #9A9DA6;
+  --text-tertiary:    #62656E;
+  --text-faint:       #43464F;
+  --text-on-accent:   #0b0d18;
+
+  /* ---- Interaction accent (indigo) — active state, links, threads ---- */
+  --accent:           #6E8BFF;
+  --accent-hover:     #87A0FF;
+  --accent-dim:       rgba(110, 139, 255, 0.14);
+  --accent-line:      rgba(110, 139, 255, 0.40);
+
+  /* ---- Semantic: Pass (green) ---- */
+  --pass:             #57C98A;
+  --pass-hover:       #6FD79C;
+  --pass-dim:         rgba(87, 201, 138, 0.13);
+  --pass-line:        rgba(87, 201, 138, 0.42);
+
+  /* ---- Semantic: Flag (amber) ---- */
+  --flag:             #E3B341;
+  --flag-hover:       #EFC25C;
+  --flag-dim:         rgba(227, 179, 65, 0.13);
+  --flag-line:        rgba(227, 179, 65, 0.42);
+
+  /* ---- Diff ---- */
+  --diff-add-bg:      rgba(87, 201, 138, 0.10);
+  --diff-add-edge:    rgba(87, 201, 138, 0.55);
+  --diff-del-bg:      rgba(224, 112, 112, 0.09);
+  --diff-del-edge:    rgba(224, 112, 112, 0.50);
+  --diff-del-text:    #D89090;
+
+  /* ---- Syntax (calm, low-saturation; nothing shouts) ---- */
+  --syn-keyword:      #B58CE6;   /* func, return, if, package          */
+  --syn-func:         #7AA2F7;   /* function & method names            */
+  --syn-type:         #5BC8C0;   /* types, structs                     */
+  --syn-string:       #8FBF73;   /* string literals                    */
+  --syn-number:       #E0A85B;   /* numeric & const literals           */
+  --syn-const:        #E8956B;   /* true/false/nil                     */
+  --syn-comment:      #565A64;   /* comments — italic, dim             */
+  --syn-punct:        #868A93;   /* braces, dots, operators            */
+  --syn-plain:        #C8CAD0;   /* identifiers, default text          */
+
+  /* ---- Glow used to lift the focused card off the canvas ---- */
+  --glow-focus:       rgba(110, 139, 255, 0.08);
+}

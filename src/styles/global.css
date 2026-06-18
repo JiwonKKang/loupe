@@ -1,0 +1,25 @@
+/* ============================================================
+   Loupe — global stylesheet.
+   Resets, app body styling, the hero card-advance keyframes, and
+   scrollbar styling. Ported from the prototype's index.html <style>
+   block. Design tokens are imported separately (see main.jsx).
+   ============================================================ */
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg-base); }
+body { font-family: var(--font-ui); color: var(--text-primary);
+       -webkit-font-smoothing: antialiased; overflow: hidden; }
+#root { position: fixed; inset: 0; }
+
+@keyframes loupe-card-in {
+  from { transform: translateX(var(--enter-x, 36px)) scale(0.994); }
+  to   { transform: translateX(0) scale(1); }
+}
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
+  border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}

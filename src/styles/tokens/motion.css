@@ -1,0 +1,25 @@
+/* Loupe — Motion tokens
+   Movement is calm and decisive. Cards slide; everything else fades.
+   Nothing bounces, nothing loops. The hero motion is the card advance:
+   a soft slide that gives a sense of progress through the queue. */
+
+:root {
+  /* ---- Durations ---- */
+  --dur-instant: 90ms;    /* @kind other */
+  --dur-fast:    140ms;   /* @kind other */ /* hover, dim transitions */
+  --dur-base:    220ms;   /* @kind other */ /* most UI transitions */
+  --dur-slow:    380ms;   /* @kind other */ /* card advance / queue expand */
+
+  /* ---- Easing ---- */
+  --ease-out:    cubic-bezier(0.22, 1, 0.36, 1);   /* @kind other */ /* enter, settle */
+  --ease-in:     cubic-bezier(0.55, 0, 1, 0.45);   /* @kind other */ /* exit */
+  --ease-soft:   cubic-bezier(0.4, 0, 0.2, 1);     /* @kind other */ /* general */
+
+  /* ---- Composed transitions ---- */
+  --t-dim:   opacity var(--dur-fast) var(--ease-soft);
+  --t-hover: background-color var(--dur-fast) var(--ease-soft),
+             border-color var(--dur-fast) var(--ease-soft),
+             color var(--dur-fast) var(--ease-soft);
+  --t-rail:  width var(--dur-slow) var(--ease-out),
+             opacity var(--dur-base) var(--ease-soft);
+}
