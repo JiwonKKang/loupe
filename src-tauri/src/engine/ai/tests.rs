@@ -200,25 +200,29 @@ async fn oauth_haiku_pong() {
     );
 }
 
-/// Stage-③+④ end-to-end against a real repo + live Haiku: build cluster cards from
-/// dearday's strong-seeds (`main...feat/https-via-caddy`) and run `analyze_clusters`, then
-/// assert **every returned card id (clustered or unclustered) is inside the whitelist**
-/// (M4 — no hallucination escaped verification) and **nothing was dropped** (§3.1 — the
-/// clustered+unclustered union equals the whitelist).
+/// Stage-③→④→⑤→⑥ **full pipeline** end-to-end against a real repo + live Haiku: build
+/// cluster cards from dearday's strong-seeds (`main...feat/kakao-auth`) and run
+/// `analyze_clusters` (clustering → ordering → title/summary), then assert:
+///  (a) every ordered card id (clustered or unclustered) is inside the whitelist (M4 —
+///      no hallucination escaped verification) and nothing was dropped (§3.1 — the
+///      ordered ∪ unclustered union equals the whitelist),
+///  (b) every cluster's title AND summary are non-empty (B1),
+///  (c) prints the final cluster list (inter-cluster order → each cluster's title + kind
+///      + ordered members) for human inspection.
 ///
 /// Skips (passes) when `LOUPE_OAUTH_TOKEN` is unset or the dearday repo is absent. Token
 /// is read from the environment only — never hard-coded. Run with:
-///   LOUPE_OAUTH_TOKEN=... cargo test -- --ignored dearday_cluster_step_ids_in_whitelist
+///   LOUPE_OAUTH_TOKEN=... cargo test -- --ignored --nocapture dearday_full_pipeline
 #[ignore = "requires LOUPE_OAUTH_TOKEN + dearday repo; hits the live Anthropic API"]
 #[tokio::test]
-async fn dearday_cluster_step_ids_in_whitelist() {
+async fn dearday_full_pipeline_orders_labels_and_keeps_whitelist() {
     use crate::engine::{analyze_clusters, analyze_relations, build_cluster_cards, build_review};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     let token = match std::env::var("LOUPE_OAUTH_TOKEN") {
         Ok(t) if !t.is_empty() => t,
         _ => {
-            eprintln!("LOUPE_OAUTH_TOKEN unset — skipping live dearday clustering test");
+            eprintln!("LOUPE_OAUTH_TOKEN unset — skipping live dearday full-pipeline test");
             return;
         }
     };
@@ -227,9 +231,9 @@ async fn dearday_cluster_step_ids_in_whitelist() {
         eprintln!("dearday repo absent — skipping");
         return;
     }
-    let (base, target) = ("main", "feat/https-via-caddy");
+    let (base, target) = ("main", "feat/kakao-auth");
 
-    // Reconstruct the same whitelist the pipeline uses (Stage-1 cards → seeds → cards).
+    // Reconstruct the same whitelist + a card_id→name map the pipeline uses.
     let review = build_review(repo, base, target).expect("stage-1 build_review");
     let analysis = analyze_relations(repo, base, target).expect("stage-2 relations");
     let cluster_cards =
@@ -238,31 +242,71 @@ async fn dearday_cluster_step_ids_in_whitelist() {
         .iter()
         .flat_map(|c| c.changed_symbols.iter().map(|s| s.card_id.clone()))
         .collect();
+    let name_of: BTreeMap<String, String> = cluster_cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter())
+        .map(|s| (s.card_id.clone(), s.name.clone()))
+        .collect();
+    let label = |id: &str| match name_of.get(id) {
+        Some(n) => format!("{n} [{id}]"),
+        None => id.to_string(),
+    };
 
     if whitelist.is_empty() {
-        eprintln!("dearday diff produced no changed code symbols — skipping cluster assertion");
+        eprintln!("dearday diff produced no changed code symbols — skipping pipeline assertion");
         return;
     }
 
     let provider = OAuthProvider::new(token);
-    let result = analyze_clusters(&provider, repo, base, target)
+    let layout = analyze_clusters(&provider, repo, base, target)
         .await
-        .expect("live dearday clustering should succeed and verify");
+        .expect("live dearday full pipeline should succeed and verify");
 
-    // Every clustered id is in the whitelist (verifier guarantees this; assert anyway).
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for c in &result.clusters {
-        for id in &c.member_card_ids {
-            assert!(whitelist.contains(id), "clustered id {id} not in whitelist");
-            seen.insert(id.clone());
+    // (c) Print the final, ordered, labelled cluster list.
+    eprintln!(
+        "\n========== dearday full pipeline :: {base}...{target} ({} clusters) ==========",
+        layout.clusters.len()
+    );
+    for (i, c) in layout.clusters.iter().enumerate() {
+        eprintln!("\n  [{}] cluster {} :: kind={:?}", i + 1, c.id, c.kind);
+        eprintln!("      title:   {}", c.title);
+        eprintln!("      summary: {}", c.summary);
+        eprintln!("      members (flow order):");
+        for id in &c.ordered_card_ids {
+            eprintln!("        - {}", label(id));
         }
     }
-    for id in &result.unclustered {
+    if !layout.unclustered.is_empty() {
+        eprintln!("\n  Unclustered changes ({}):", layout.unclustered.len());
+        for id in &layout.unclustered {
+            eprintln!("        - {}", label(id));
+        }
+    }
+    eprintln!("\n========== end full pipeline ==========\n");
+
+    // (a) Every ordered/unclustered id is whitelisted and nothing is dropped (§3.1).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for c in &layout.clusters {
+        for id in &c.ordered_card_ids {
+            assert!(whitelist.contains(id), "ordered id {id} not in whitelist");
+            assert!(seen.insert(id.clone()), "ordered id {id} appeared twice");
+        }
+        // (b) B1 — title and summary are non-empty for every cluster.
+        assert!(!c.title.trim().is_empty(), "cluster {} has empty title", c.id);
+        assert!(!c.summary.trim().is_empty(), "cluster {} has empty summary", c.id);
+    }
+    for id in &layout.unclustered {
         assert!(whitelist.contains(id), "unclustered id {id} not in whitelist");
         seen.insert(id.clone());
     }
-    // No-drop: clustered ∪ unclustered == whitelist (§3.1 "all changes are visible").
-    assert_eq!(seen, whitelist, "no card id may be dropped");
+    assert_eq!(seen, whitelist, "no card id may be dropped (ordered ∪ unclustered == whitelist)");
+
+    // The flat order is exactly the ordered cluster members then the unclustered bucket.
+    assert_eq!(
+        layout.ordered_card_ids.len(),
+        whitelist.len(),
+        "flat order must list every card id exactly once"
+    );
 }
 
 // ---------------------------------------------------------------------------

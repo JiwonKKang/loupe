@@ -191,27 +191,56 @@ pub fn analyze_relations(
     })
 }
 
-/// Stage-③+④ entry point: refine the Stage-② analysis into AI cluster cards and run the
-/// AI clustering (seed-correction) step. **Pure orchestration over an injected provider**
-/// — no IPC, no cache (both deferred). Stage-1's `ReviewData` is untouched; this returns a
-/// `ClusterResult` sidecar the orchestrator will fold into `ReviewData` in a later stage.
+/// The final Stage-④+⑤+⑥ layout: ordered, labelled clusters + the flat order, ready to be
+/// folded into `ReviewData` by the IPC orchestrator (a later stage). Stage-1's `ReviewData`
+/// stays untouched — this is the AI sidecar.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterLayout {
+    /// Clusters in inter-cluster order; each carries its title/summary/kind and the
+    /// intra-cluster ordered card ids (`Cluster::ordered_card_ids`).
+    pub clusters: Vec<Cluster>,
+    /// Inter-cluster order = the ids of `clusters` in order (convenience / parity with
+    /// `ReviewData.cluster_order`). The trailing `"__unclustered"` bucket is not listed
+    /// here; it is rendered after all clusters from `unclustered`.
+    pub cluster_order: Vec<String>,
+    /// The full flatten order: every clustered card id (in cluster order, intra-order),
+    /// then the unclustered bucket. The front-end's index source of truth.
+    pub ordered_card_ids: Vec<String>,
+    /// Card ids in the Unclustered bucket (§3.1 — always shown, never dropped).
+    pub unclustered: Vec<String>,
+    /// §6.3 display-only merge suggestions.
+    pub merge_suggestions: Vec<Suggestion>,
+    /// §6.3 display-only split suggestions.
+    pub split_suggestions: Vec<Suggestion>,
+}
+
+/// Stage-③→④→⑤→⑥ entry point: refine the Stage-② analysis into AI cluster cards, then run
+/// the full AI pipeline — clustering (seed correction) → ordering (intra/inter flow) →
+/// title/summary labelling — and assemble the final [`ClusterLayout`]. **Pure
+/// orchestration over an injected provider** — no IPC, no cache (both deferred). Stage-1's
+/// `ReviewData` is untouched; this is the AI sidecar.
 ///
 /// Pipeline (v2.1):
 ///  1. [`build_review`] → Stage-1 `cards` (the card-id source of truth / whitelist).
 ///  2. [`analyze_relations`] → strong-seed first-pass clusters + relation hints.
 ///  3. [`clustercard::build_cluster_cards`] → one refined `ClusterCardInput` per seed
 ///     (no raw diff; short summaries only — input-size defence).
-///  4. [`ai::steps::cluster_step`] → AI merges/splits/places the seeds, verified against
-///     the card-id whitelist (hallucination reject; omitted ids absorbed, no drop).
+///  4+5. **Small PR (≤ SMALL_PR_SYMBOLS): one combined call** clusters AND orders
+///     ([`ai::steps::cluster_and_order_combined`], planning §4.1). **Big PR: two calls** —
+///     [`ai::steps::cluster_step`] then [`ai::steps::order_step`]. Both are whitelist-
+///     verified (hallucination reject; omitted ids absorbed; ordering = permutation).
+///  6. [`ai::steps::label_step`] → ONE batched title/summary call for all clusters,
+///     B1-safe + M4 token-checked (§6.2 / §8.4).
 ///
-/// On AI failure (after the step's one retry) the `Err` propagates so a caller can fall
+/// On AI failure (after each step's one retry) the `Err` propagates so a caller can fall
 /// back; this function does not itself implement the layer-heuristic fallback (Stage-⑩).
 pub async fn analyze_clusters(
     provider: &dyn ai::LlmProvider,
     repo_path: &str,
     base: &str,
     target: &str,
-) -> Result<ai::steps::ClusterResult, EngineError> {
+) -> Result<ClusterLayout, EngineError> {
     let review = build_review(repo_path, base, target)?;
     let analysis = analyze_relations(repo_path, base, target)?;
 
@@ -222,9 +251,180 @@ pub async fn analyze_clusters(
         &review.cards,
     );
 
-    ai::steps::cluster_step(provider, &cards)
+    run_cluster_pipeline(provider, &cards, &analysis.hints)
         .await
-        .map_err(|e| EngineError::Parse(format!("AI clustering failed: {e}")))
+        .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))
+}
+
+/// Run clustering → ordering → labelling over the prepared cluster cards and assemble the
+/// final [`ClusterLayout`]. Separated from [`analyze_clusters`] so it can be unit-tested
+/// with a mock provider on synthetic cards (no git / no network).
+pub async fn run_cluster_pipeline(
+    provider: &dyn ai::LlmProvider,
+    cards: &[clustercard::ClusterCardInput],
+    hints: &relations::RelationHints,
+) -> Result<ClusterLayout, ai::LlmError> {
+    use ai::steps;
+
+    let whitelist = steps::whitelist_of(cards);
+
+    // ④+⑤: small PR ⇒ one combined call; big PR ⇒ cluster then order (planning §4.1).
+    let (clustering, ordering) = if steps::is_small_pr(cards) {
+        steps::cluster_and_order_combined(provider, cards).await?
+    } else {
+        let clustering = steps::cluster_step(provider, cards).await?;
+        let ordering = steps::order_step(provider, &clustering, hints, &whitelist).await?;
+        (clustering, ordering)
+    };
+
+    // ⑥: batched title/summary over the ordered clusters.
+    let label_inputs = build_label_inputs(&clustering, cards);
+    let allowed_names = allowed_symbol_names(cards);
+    let label_outcome = steps::label_step(provider, &label_inputs, &allowed_names).await?;
+
+    Ok(assemble_layout(clustering, ordering, label_outcome, cards))
+}
+
+/// Build the labelling inputs (Stage-⑥) from the clustering result + the cluster cards:
+/// one `LabelInput` per cluster carrying its kind and its changed symbols (name / kind /
+/// change / short summary), resolved from the cards by card id.
+fn build_label_inputs(
+    clustering: &ai::steps::ClusterResult,
+    cards: &[clustercard::ClusterCardInput],
+) -> Vec<ai::steps::LabelInput> {
+    use std::collections::BTreeMap;
+    // card_id -> the changed-symbol context (name/kind/change/summary).
+    let by_id: BTreeMap<&str, &clustercard::ChangedSymbolIn> = cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter())
+        .map(|s| (s.card_id.as_str(), s))
+        .collect();
+
+    clustering
+        .clusters
+        .iter()
+        .map(|c| ai::steps::LabelInput {
+            cluster_id: c.cluster_id.clone(),
+            kind: c.kind,
+            changed_symbols: c
+                .member_card_ids
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()))
+                .map(|s| ai::steps::LabelSymbolIn {
+                    name: s.name.clone(),
+                    kind: s.kind,
+                    change_type: s.change_type,
+                    summary: s.summary.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// The bare-name whitelist for the M4 token check (Stage-⑥): every changed symbol's name.
+fn allowed_symbol_names(cards: &[clustercard::ClusterCardInput]) -> std::collections::BTreeSet<String> {
+    cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter().map(|s| s.name.clone()))
+        .collect()
+}
+
+/// Fold the three AI outputs into the final [`ClusterLayout`]: order the clusters by the
+/// ordering result's `clusterOrder`, attach each cluster's ordered card ids + title/
+/// summary/kind, compute the flat `ordered_card_ids`, and pass through the suggestions.
+fn assemble_layout(
+    clustering: ai::steps::ClusterResult,
+    ordering: ai::steps::OrderResult,
+    labels: ai::steps::LabelOutcome,
+    cards: &[clustercard::ClusterCardInput],
+) -> ClusterLayout {
+    use std::collections::BTreeMap;
+
+    // cluster_id -> ordered card ids (from the ordering result).
+    let order_by_cluster: BTreeMap<&str, &Vec<String>> = ordering
+        .ordered_by_cluster
+        .iter()
+        .map(|oc| (oc.cluster_id.as_str(), &oc.card_ids))
+        .collect();
+    // cluster_id -> kind / type_hint (from the clustering result).
+    let kind_by_cluster: BTreeMap<&str, ClusterKind> = clustering
+        .clusters
+        .iter()
+        .map(|c| (c.cluster_id.as_str(), c.kind))
+        .collect();
+    // cluster_id -> (title, summary) from the labelling result.
+    let label_by_cluster: BTreeMap<&str, (&str, &str)> = labels
+        .labels
+        .clusters
+        .iter()
+        .map(|l| (l.cluster_id.as_str(), (l.title.as_str(), l.summary.as_str())))
+        .collect();
+    // A card's algorithmic type-hint: take it from the first card whose seed kind we know.
+    // (The clustering kind is the AI's final call; type_hint mirrors the algorithmic
+    // guess that fed the cluster card. We reuse the AI kind as a safe default when the
+    // per-cluster hint is not separable post-clustering.)
+    let _ = cards;
+
+    // Inter-cluster order: `clusterOrder` lists every clustered id exactly once (verifier
+    // guarantees this). Any cluster missing from it (shouldn't happen) is appended.
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut ordered_ids: Vec<String> = Vec::new();
+    for id in &ordering.cluster_order {
+        if kind_by_cluster.contains_key(id.as_str()) && seen.insert(id.as_str()) {
+            ordered_ids.push(id.clone());
+        }
+    }
+    for c in &clustering.clusters {
+        if seen.insert(c.cluster_id.as_str()) {
+            ordered_ids.push(c.cluster_id.clone());
+        }
+    }
+
+    let mut clusters: Vec<Cluster> = Vec::with_capacity(ordered_ids.len());
+    let mut flat: Vec<String> = Vec::new();
+    for id in &ordered_ids {
+        let kind = kind_by_cluster.get(id.as_str()).copied().unwrap_or_default();
+        let ordered_card_ids: Vec<String> = order_by_cluster
+            .get(id.as_str())
+            .map(|v| (*v).clone())
+            .unwrap_or_default();
+        flat.extend(ordered_card_ids.iter().cloned());
+        let (title, summary) = label_by_cluster
+            .get(id.as_str())
+            .map(|(t, s)| (t.to_string(), s.to_string()))
+            .unwrap_or_else(|| ("Changes".to_string(), "Changes in this cluster.".to_string()));
+        clusters.push(Cluster {
+            id: id.clone(),
+            title,
+            summary,
+            kind,
+            // type_hint mirrors the AI's final kind here (the per-seed algorithmic hint is
+            // not preserved through clustering); kept for the debug/display contract.
+            type_hint: kind,
+            ordered_card_ids,
+        });
+    }
+
+    // Unclustered bucket trails after all clusters (§3.1 — always shown).
+    flat.extend(ordering.unclustered.iter().cloned());
+
+    ClusterLayout {
+        clusters,
+        cluster_order: ordered_ids,
+        ordered_card_ids: flat,
+        unclustered: ordering.unclustered,
+        merge_suggestions: labels.labels.merge_suggestions.iter().map(to_suggestion("merge")).collect(),
+        split_suggestions: labels.labels.split_suggestions.iter().map(to_suggestion("split")).collect(),
+    }
+}
+
+/// Map an AI suggestion (`SuggestionOut`) to the IPC `Suggestion` with a fixed kind label.
+fn to_suggestion(kind: &'static str) -> impl Fn(&ai::steps::SuggestionOut) -> Suggestion {
+    move |s| Suggestion {
+        kind: kind.to_string(),
+        cluster_ids: s.cluster_ids.clone(),
+        reason: s.reason.clone(),
+    }
 }
 
 /// Heuristic test detection (planning: test→impl strong relation). Name/path based and
@@ -289,3 +489,7 @@ fn collect_imports(lang: symbols::Lang, source: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "pipeline_tests.rs"]
+mod pipeline_tests;

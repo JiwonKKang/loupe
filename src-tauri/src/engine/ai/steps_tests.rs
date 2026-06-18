@@ -270,3 +270,326 @@ fn ai_cluster_kind_deserializes_kebab_case() {
     .unwrap();
     assert_eq!(c.kind, ClusterKind::DomainConcept);
 }
+
+// ===========================================================================
+// Stage-⑤ — order_step
+// ===========================================================================
+
+/// A clustering result with one cluster `c1` over the given member ids (kind flow).
+fn clustering(members: &[&str]) -> ClusterResult {
+    ClusterResult {
+        clusters: vec![AiCluster {
+            cluster_id: "c1".into(),
+            member_card_ids: members.iter().map(|s| s.to_string()).collect(),
+            kind: ClusterKind::Flow,
+        }],
+        unclustered: vec![],
+    }
+}
+
+fn wl(ids: &[&str]) -> std::collections::BTreeSet<String> {
+    ids.iter().map(|s| s.to_string()).collect()
+}
+
+#[tokio::test]
+async fn order_step_orders_within_cluster_on_fast_tier_temp0() {
+    let clusters = clustering(&["a", "b", "c"]);
+    // The AI reorders the cluster's members into flow order c,a,b and lists clusterOrder.
+    let provider = SeqProvider::one(json!({
+        "clusterOrder": ["c1"],
+        "orderedByCluster": [ { "clusterId": "c1", "cardIds": ["c", "a", "b"] } ]
+    }));
+    let out = order_step(&provider, &clusters, &RelationHints::default(), &wl(&["a", "b", "c"]))
+        .await
+        .expect("valid ordering");
+    assert_eq!(out.cluster_order, vec!["c1".to_string()]);
+    assert_eq!(out.ordered_by_cluster.len(), 1);
+    assert_eq!(
+        out.ordered_by_cluster[0].card_ids,
+        vec!["c".to_string(), "a".to_string(), "b".to_string()]
+    );
+    let req = provider.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req.tier, ModelTier::Fast, "ordering uses Haiku (Fast)");
+    assert_eq!(req.temperature, 0.0, "ordering at temp=0 for 재현성");
+    assert_eq!(req.system, crate::engine::ai::prompts::ORDER_SYSTEM);
+    assert!(req.user.contains("\"clusters\""));
+    assert!(req.user.contains("relationHints"));
+    assert_eq!(provider.call_count(), 1);
+}
+
+#[tokio::test]
+async fn order_step_empty_clustering_makes_no_call() {
+    let empty = ClusterResult { clusters: vec![], unclustered: vec!["x".into()] };
+    let provider = SeqProvider::new(vec![]);
+    let out = order_step(&provider, &empty, &RelationHints::default(), &wl(&["x"]))
+        .await
+        .unwrap();
+    assert!(out.ordered_by_cluster.is_empty());
+    assert_eq!(out.unclustered, vec!["x".to_string()], "unclustered carried through");
+    assert_eq!(provider.call_count(), 0, "no clusters ⇒ no network call");
+}
+
+#[tokio::test]
+async fn order_step_rejects_dropped_member_then_retries() {
+    let clusters = clustering(&["a", "b", "c"]);
+    // First reply drops "c" (not a permutation) → reject; second is a clean permutation.
+    let provider = SeqProvider::new(vec![
+        Ok(json!({
+            "clusterOrder": ["c1"],
+            "orderedByCluster": [ { "clusterId": "c1", "cardIds": ["a", "b"] } ]
+        })),
+        Ok(json!({
+            "clusterOrder": ["c1"],
+            "orderedByCluster": [ { "clusterId": "c1", "cardIds": ["a", "b", "c"] } ]
+        })),
+    ]);
+    let out = order_step(&provider, &clusters, &RelationHints::default(), &wl(&["a", "b", "c"]))
+        .await
+        .expect("retry recovers");
+    assert_eq!(out.ordered_by_cluster[0].card_ids.len(), 3);
+    assert_eq!(provider.call_count(), 2, "one reject ⇒ exactly one retry");
+}
+
+#[tokio::test]
+async fn order_step_degrades_to_clustering_order_when_ai_wont_validate() {
+    // Both replies hallucinate (a Parse-class verify failure) ⇒ after the retry, ordering
+    // degrades to the clustering's own member order (clustering is source of truth), never
+    // leaking the bad id. The pipeline stays alive (no Err).
+    let clusters = clustering(&["a", "b"]);
+    let bad = json!({
+        "clusterOrder": ["c1"],
+        "orderedByCluster": [ { "clusterId": "c1", "cardIds": ["a", "ghost"] } ]
+    });
+    let provider = SeqProvider::new(vec![Ok(bad.clone()), Ok(bad)]);
+    let out = order_step(&provider, &clusters, &RelationHints::default(), &wl(&["a", "b"]))
+        .await
+        .expect("degrades, does not error");
+    assert_eq!(provider.call_count(), 2, "tried twice, then degraded");
+    // Identity order = the clustering's own member order; no hallucinated id present.
+    assert_eq!(
+        out.ordered_by_cluster[0].card_ids,
+        vec!["a".to_string(), "b".to_string()]
+    );
+    assert_eq!(out.cluster_order, vec!["c1".to_string()]);
+}
+
+#[tokio::test]
+async fn order_step_propagates_transport_error_without_degrading() {
+    // An Overloaded transport error is infrastructural, not a bad order — it must surface
+    // (so the caller can back off), NOT silently degrade to identity order.
+    let clusters = clustering(&["a", "b"]);
+    let provider = SeqProvider::new(vec![
+        Err(LlmError::Overloaded),
+        Err(LlmError::Overloaded),
+    ]);
+    let err = order_step(&provider, &clusters, &RelationHints::default(), &wl(&["a", "b"]))
+        .await
+        .unwrap_err();
+    assert_eq!(err, LlmError::Overloaded);
+    assert_eq!(provider.call_count(), 2);
+}
+
+// ===========================================================================
+// Small-PR branch — cluster_and_order_combined
+// ===========================================================================
+
+#[tokio::test]
+async fn cluster_and_order_combined_clusters_and_orders_in_one_call() {
+    let cards = vec![card("seed-1", &[("a", "create"), ("b", "validate")])];
+    // One reply carries clustering (ordered members + kind) AND the inter-cluster order.
+    let provider = SeqProvider::one(json!({
+        "clusters": [ { "clusterId": "c1", "memberCardIds": ["a", "b"], "kind": "flow" } ],
+        "unclustered": [],
+        "clusterOrder": ["c1"]
+    }));
+    let (clustering, ordering) = cluster_and_order_combined(&provider, &cards)
+        .await
+        .expect("combined output");
+    assert_eq!(clustering.clusters.len(), 1);
+    assert_eq!(ordering.cluster_order, vec!["c1".to_string()]);
+    // The combined memberCardIds ARE the order (Part B of the prompt).
+    assert_eq!(
+        ordering.ordered_by_cluster[0].card_ids,
+        vec!["a".to_string(), "b".to_string()]
+    );
+    assert_eq!(provider.call_count(), 1, "small PR ⇒ ONE merged call");
+    let req = provider.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req.system, crate::engine::ai::prompts::CLUSTER_AND_ORDER_SYSTEM);
+}
+
+#[tokio::test]
+async fn cluster_and_order_combined_absorbs_omitted_ids() {
+    // Whitelist a,b,c; combined call clusters only a → b,c absorbed (no drop), still valid.
+    let cards = vec![card("seed-1", &[("a", "x"), ("b", "y"), ("c", "z")])];
+    let provider = SeqProvider::one(json!({
+        "clusters": [ { "clusterId": "c1", "memberCardIds": ["a"], "kind": "flow" } ],
+        "unclustered": [],
+        "clusterOrder": ["c1"]
+    }));
+    let (clustering, ordering) = cluster_and_order_combined(&provider, &cards).await.unwrap();
+    assert_eq!(clustering.unclustered, vec!["b".to_string(), "c".to_string()]);
+    assert_eq!(ordering.unclustered, vec!["b".to_string(), "c".to_string()]);
+}
+
+#[tokio::test]
+async fn cluster_and_order_combined_empty_input_makes_no_call() {
+    let provider = SeqProvider::new(vec![]);
+    let (clustering, ordering) = cluster_and_order_combined(&provider, &[]).await.unwrap();
+    assert!(clustering.clusters.is_empty() && ordering.ordered_by_cluster.is_empty());
+    assert_eq!(provider.call_count(), 0);
+}
+
+// ===========================================================================
+// Stage-⑥ — label_step (batch, B1, M4)
+// ===========================================================================
+
+fn label_input(cluster_id: &str, syms: &[(&str, &str)]) -> LabelInput {
+    LabelInput {
+        cluster_id: cluster_id.to_string(),
+        kind: ClusterKind::Flow,
+        changed_symbols: syms
+            .iter()
+            .map(|(n, s)| LabelSymbolIn {
+                name: n.to_string(),
+                kind: SymbolKind::Function,
+                change_type: ChangeType::Modified,
+                summary: s.to_string(),
+            })
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn label_step_batches_all_clusters_in_one_call() {
+    let inputs = vec![
+        label_input("c1", &[("createOrder", "creates an order")]),
+        label_input("c2", &[("applyCoupon", "applies a coupon")]),
+    ];
+    let provider = SeqProvider::one(json!({
+        "clusters": [
+            { "clusterId": "c1", "title": "주문 생성", "summary": "Creates an order." },
+            { "clusterId": "c2", "title": "쿠폰 적용", "summary": "Applies a coupon." }
+        ],
+        "mergeSuggestions": [],
+        "splitSuggestions": []
+    }));
+    let allowed = wl(&["createOrder", "applyCoupon"]);
+    let out = label_step(&provider, &inputs, &allowed).await.expect("labels");
+    assert_eq!(out.labels.clusters.len(), 2);
+    assert_eq!(provider.call_count(), 1, "ALL clusters in ONE batched call (§8.4)");
+    let req = provider.last.lock().unwrap().clone().unwrap();
+    assert_eq!(req.tier, ModelTier::Fast);
+    assert_eq!(req.temperature, 0.0);
+    assert_eq!(req.system, crate::engine::ai::prompts::LABEL_SYSTEM);
+    assert!(req.user.contains("\"clusters\""));
+}
+
+#[tokio::test]
+async fn label_step_b1_substitutes_fallback_for_empty_title_summary() {
+    let inputs = vec![label_input("c1", &[("createOrder", "creates")])];
+    // The AI returns an empty title and empty summary — B1 must substitute fallbacks.
+    let provider = SeqProvider::one(json!({
+        "clusters": [ { "clusterId": "c1", "title": "", "summary": "" } ],
+        "mergeSuggestions": [],
+        "splitSuggestions": []
+    }));
+    let out = label_step(&provider, &inputs, &wl(&["createOrder"])).await.unwrap();
+    assert!(!out.labels.clusters[0].title.trim().is_empty(), "B1: title never empty");
+    assert!(!out.labels.clusters[0].summary.trim().is_empty(), "B1: summary never empty");
+}
+
+#[tokio::test]
+async fn label_step_backfills_a_cluster_the_ai_skipped() {
+    // Two clusters in, but the AI only labelled c1 → c2 must get a fallback (B1).
+    let inputs = vec![
+        label_input("c1", &[("a", "x")]),
+        label_input("c2", &[("b", "y")]),
+    ];
+    let provider = SeqProvider::one(json!({
+        "clusters": [ { "clusterId": "c1", "title": "T", "summary": "S." } ],
+        "mergeSuggestions": [],
+        "splitSuggestions": []
+    }));
+    let out = label_step(&provider, &inputs, &wl(&["a", "b"])).await.unwrap();
+    assert_eq!(out.labels.clusters.len(), 2, "every input cluster gets a label");
+    let c2 = out.labels.clusters.iter().find(|l| l.cluster_id == "c2").unwrap();
+    assert!(!c2.title.trim().is_empty() && !c2.summary.trim().is_empty());
+}
+
+#[tokio::test]
+async fn label_step_flags_hallucinated_identifier_in_summary() {
+    let inputs = vec![label_input("c1", &[("createOrder", "creates")])];
+    // The summary mentions PaymentGateway — not in the input → flagged via M4 token check.
+    let provider = SeqProvider::one(json!({
+        "clusters": [
+            { "clusterId": "c1", "title": "Order", "summary": "Calls PaymentGateway.charge() too." }
+        ],
+        "mergeSuggestions": [],
+        "splitSuggestions": []
+    }));
+    let out = label_step(&provider, &inputs, &wl(&["createOrder"])).await.unwrap();
+    let flagged = out.suspicious.get("c1").expect("c1 should have suspicious tokens");
+    assert!(flagged.iter().any(|t| t.contains("PaymentGateway")), "got {flagged:?}");
+    // The label is still produced (free-text hallucination is not fatal, §8.3).
+    assert!(!out.labels.clusters[0].summary.is_empty());
+}
+
+#[tokio::test]
+async fn label_step_drops_suggestion_naming_unknown_cluster() {
+    let inputs = vec![label_input("c1", &[("a", "x")])];
+    let provider = SeqProvider::one(json!({
+        "clusters": [ { "clusterId": "c1", "title": "T", "summary": "S." } ],
+        "mergeSuggestions": [ { "clusterIds": ["c1", "ghost"], "reason": "looks related" } ],
+        "splitSuggestions": []
+    }));
+    let out = label_step(&provider, &inputs, &wl(&["a"])).await.unwrap();
+    assert!(out.labels.merge_suggestions.is_empty(), "suggestion naming unknown cluster dropped");
+}
+
+#[tokio::test]
+async fn label_step_empty_input_makes_no_call() {
+    let provider = SeqProvider::new(vec![]);
+    let out = label_step(&provider, &[], &wl(&[])).await.unwrap();
+    assert!(out.labels.clusters.is_empty());
+    assert_eq!(provider.call_count(), 0);
+}
+
+// ===========================================================================
+// M1 schemas for stages ⑤/⑥
+// ===========================================================================
+
+#[test]
+fn order_output_schema_is_m1_flat_no_dynamic_map() {
+    use crate::engine::ai::prompts::order_output_schema;
+    let schema = order_output_schema();
+    assert_eq!(schema["additionalProperties"], json!(false));
+    // orderedByCluster is an ARRAY of fixed-key objects (NOT {clusterId: [...]}).
+    assert_eq!(schema["properties"]["orderedByCluster"]["type"], "array");
+    let item = &schema["properties"]["orderedByCluster"]["items"];
+    assert_eq!(item["additionalProperties"], json!(false));
+    assert_eq!(item["properties"]["cardIds"]["type"], "array");
+    assert_eq!(schema["properties"]["clusterOrder"]["type"], "array");
+}
+
+#[test]
+fn label_output_schema_is_m1_flat() {
+    use crate::engine::ai::prompts::label_output_schema;
+    let schema = label_output_schema();
+    assert_eq!(schema["additionalProperties"], json!(false));
+    let item = &schema["properties"]["clusters"]["items"];
+    assert_eq!(item["additionalProperties"], json!(false));
+    let req = item["required"].as_array().unwrap();
+    assert!(req.contains(&json!("title")) && req.contains(&json!("summary")));
+    assert_eq!(schema["properties"]["mergeSuggestions"]["type"], "array");
+    assert_eq!(schema["properties"]["splitSuggestions"]["type"], "array");
+}
+
+#[test]
+fn combined_output_schema_carries_clusters_and_cluster_order() {
+    use crate::engine::ai::prompts::cluster_and_order_output_schema;
+    let schema = cluster_and_order_output_schema();
+    let req = schema["required"].as_array().unwrap();
+    assert!(req.contains(&json!("clusters")));
+    assert!(req.contains(&json!("unclustered")));
+    assert!(req.contains(&json!("clusterOrder")));
+}

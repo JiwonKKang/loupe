@@ -16,8 +16,8 @@
 //!     Wired into the labelling step later; unit-tested here now.
 
 use super::LlmError;
-use super::steps::ClusterResult;
-use std::collections::BTreeSet;
+use super::steps::{ClusterResult, LabelResult, OrderResult};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Verify + normalize a clustering result against the input card-id whitelist.
 ///
@@ -72,6 +72,143 @@ pub fn verify_clusters(
     result.unclustered = unclustered_set.into_iter().collect();
 
     Ok(result)
+}
+
+/// Verify + normalize an **ordering** result (Stage-⑤) against the clustering result it
+/// must be consistent with. The order is only a permutation — it may not add, drop, or
+/// move card ids between clusters (planning §6.2 / §8.3). Three checks:
+///
+///  1. **Whitelist** — every `cardId` returned is in the input whitelist (else `Err`).
+///  2. **Membership parity** — each cluster's ordered `cardIds`, as a *set*, must equal
+///     the clustering result's `memberCardIds` for that cluster (no drop / no add /
+///     no cross-cluster move). A mismatch is `Err` (the caller retries, then falls back).
+///  3. **clusterOrder completeness** — `clusterOrder` must be a permutation of the
+///     clustered cluster ids; missing ids are appended (deterministic, sorted) and
+///     unknown ids are dropped, so the order is always a valid total order without
+///     rejecting an otherwise-good answer.
+///
+/// The `unclustered` bucket is carried over verbatim from `clusters` (it has no order).
+pub fn verify_order(
+    mut order: OrderResult,
+    clusters: &ClusterResult,
+    whitelist: &BTreeSet<String>,
+) -> Result<OrderResult, LlmError> {
+    // The set of member ids the clustering step decided, per cluster id.
+    let expected: BTreeMap<&str, BTreeSet<&str>> = clusters
+        .clusters
+        .iter()
+        .map(|c| {
+            (
+                c.cluster_id.as_str(),
+                c.member_card_ids.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+
+    // 1 + 2: whitelist every id and check per-cluster membership parity.
+    let mut seen_clusters: BTreeSet<&str> = BTreeSet::new();
+    for oc in &order.ordered_by_cluster {
+        for id in &oc.card_ids {
+            if !whitelist.contains(id) {
+                return Err(LlmError::Parse(format!(
+                    "hallucinated card id in ordered cluster {}: {id}",
+                    oc.cluster_id
+                )));
+            }
+        }
+        let Some(want) = expected.get(oc.cluster_id.as_str()) else {
+            return Err(LlmError::Parse(format!(
+                "ordering names unknown cluster {}",
+                oc.cluster_id
+            )));
+        };
+        let got: BTreeSet<&str> = oc.card_ids.iter().map(String::as_str).collect();
+        // Same multiplicity (no dup) AND same set: a permutation of the members.
+        if got.len() != oc.card_ids.len() {
+            return Err(LlmError::Parse(format!(
+                "ordering repeats a card id in cluster {}",
+                oc.cluster_id
+            )));
+        }
+        if &got != want {
+            return Err(LlmError::Parse(format!(
+                "ordering of cluster {} is not a permutation of its members",
+                oc.cluster_id
+            )));
+        }
+        seen_clusters.insert(oc.cluster_id.as_str());
+    }
+
+    // Every clustered cluster must have been ordered (a missing cluster = dropped members).
+    for c in &clusters.clusters {
+        if !seen_clusters.contains(c.cluster_id.as_str()) {
+            return Err(LlmError::Parse(format!(
+                "ordering omitted cluster {} entirely",
+                c.cluster_id
+            )));
+        }
+    }
+
+    // 3: normalize clusterOrder into a valid total order (keep known ids in given order,
+    // drop unknowns, append any missing clustered ids in sorted order — never reject).
+    let known: BTreeSet<&str> = expected.keys().copied().collect();
+    let mut placed: BTreeSet<String> = BTreeSet::new();
+    order.cluster_order.retain(|id| {
+        known.contains(id.as_str()) && placed.insert(id.clone())
+    });
+    for c in &clusters.clusters {
+        if !placed.contains(&c.cluster_id) {
+            order.cluster_order.push(c.cluster_id.clone());
+            placed.insert(c.cluster_id.clone());
+        }
+    }
+
+    Ok(order)
+}
+
+/// Verify + normalize a **labelling** result (Stage-⑥). Enforces the B1 invariant
+/// (title/summary never empty — empty ⇒ a non-empty fallback string is substituted) and
+/// runs the M4 token check on title+summary against the allowed bare names, dropping any
+/// suggestion that references an unknown cluster id.
+///
+/// Unlike clustering/ordering, a hallucinated identifier in free text is **not fatal**
+/// (planning §8.3 admits perfect coverage is impossible): the offending tokens are
+/// returned for the caller to log / decide on re-request, but the labels are still
+/// normalized so the pipeline never blocks on a summary phrasing.
+///
+/// Returns the normalized labels plus, per cluster id, the suspicious tokens found in its
+/// text (empty map ⇒ all clean).
+pub fn verify_labels(
+    mut labels: LabelResult,
+    cluster_ids: &BTreeSet<String>,
+    allowed_names: &BTreeSet<String>,
+) -> (LabelResult, BTreeMap<String, Vec<String>>) {
+    let mut suspicious: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for l in &mut labels.clusters {
+        // B1: title/summary must never be empty — substitute a safe fallback.
+        if l.title.trim().is_empty() {
+            l.title = "Changes".to_string();
+        }
+        if l.summary.trim().is_empty() {
+            l.summary = "Changes in this cluster.".to_string();
+        }
+        // M4: code-identifier tokens in the text not present in the input are suspicious.
+        let mut bad = suspicious_identifiers(&l.title, allowed_names);
+        bad.extend(suspicious_identifiers(&l.summary, allowed_names));
+        if !bad.is_empty() {
+            suspicious.insert(l.cluster_id.clone(), bad);
+        }
+    }
+
+    // Drop suggestions that reference clusters that don't exist (display-only; never block).
+    let keep = |s: &super::steps::SuggestionOut| {
+        !s.cluster_ids.is_empty() && s.cluster_ids.iter().all(|id| cluster_ids.contains(id))
+    };
+    labels.merge_suggestions.retain(keep);
+    labels.split_suggestions.retain(keep);
+
+    (labels, suspicious)
 }
 
 /// M4 reinforcement — extract code-identifier tokens from free text and keep only those
