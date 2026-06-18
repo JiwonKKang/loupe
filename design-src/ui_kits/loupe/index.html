@@ -5,6 +5,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Loupe — code review</title>
+<link rel="icon" type="image/png" href="app-icon.png">
+<link rel="apple-touch-icon" href="app-icon.png">
 <link rel="stylesheet" href="../../styles.css">
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
@@ -30,6 +32,19 @@
     from { opacity: 0; transform: scale(0.85); }
     to   { opacity: 1; transform: scale(1); }
   }
+  @keyframes loupe-panel-in {
+    from { transform: translateX(24px); opacity: 0; }
+    to   { transform: translateX(0); opacity: 1; }
+  }
+  @keyframes loupe-halo {
+    0%   { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
+    70%  { opacity: 0; }
+    100% { opacity: 0; transform: translate(-50%, -50%) scale(4.6); }
+  }
+  @keyframes loupe-core-glow {
+    0%, 100% { box-shadow: 0 0 0 5px var(--accent-dim), 0 0 12px 1px rgba(110,139,255,0.30); }
+    50%      { box-shadow: 0 0 0 7px var(--accent-dim), 0 0 22px 4px rgba(110,139,255,0.55); }
+  }
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
     border: 2px solid transparent; background-clip: padding-box; }
@@ -43,13 +58,15 @@
 <body>
 <div id="root"></div>
 <script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="LoupeLoader.jsx"></script>
+<script type="text/babel" src="FileTree.jsx"></script>
 <script type="text/babel" src="Onboarding.jsx"></script>
 <script type="text/babel" src="ReviewScreen.jsx"></script>
 <script type="text/babel" src="SummaryScreen.jsx"></script>
 <script type="text/babel" src="App.jsx"></script>
 <script type="text/babel" data-presets="react">
   const mount = () => {
-    if (!window.App || !window.LoupeData || !window.LoupeDesignSystem_045e3b) {
+    if (!window.App || !window.LoupeData || !window.LoupeLoader || !window.FileTree || !window.LoupeDesignSystem_045e3b) {
       return setTimeout(mount, 30);
     }
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);

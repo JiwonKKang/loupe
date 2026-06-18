@@ -24,6 +24,19 @@ body { font-family: var(--font-ui); color: var(--text-primary);
   from { opacity: 0; transform: scale(0.85); }
   to   { opacity: 1; transform: scale(1); }
 }
+@keyframes loupe-panel-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+@keyframes loupe-halo {
+  0%   { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
+  70%  { opacity: 0; }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(4.6); }
+}
+@keyframes loupe-core-glow {
+  0%, 100% { box-shadow: 0 0 0 5px var(--accent-dim), 0 0 12px 1px rgba(110,139,255,0.30); }
+  50%      { box-shadow: 0 0 0 7px var(--accent-dim), 0 0 22px 4px rgba(110,139,255,0.55); }
+}
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
   border: 2px solid transparent; background-clip: padding-box; }

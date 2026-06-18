@@ -34,13 +34,15 @@ function ReviewScreen(props) {
     return out;
   }, [card.id]);
 
-  // drag-to-create-thread state, scoped to ONE side (before | after)
+  // drag-to-create-thread state. The selection is by ROW (before+after
+  // highlight together, like GitHub), but we remember which SIDE the drag
+  // began on so a collapsed thread's badge sits in that column's gutter.
   const [dragSide, setDragSide] = React.useState(null);
   const [dragFrom, setDragFrom] = React.useState(null);
   const [dragTo, setDragTo] = React.useState(null);
-  const [hoverSide, setHoverSide] = React.useState(null);
-  const [hoverRow, setHoverRow] = React.useState(null);
-  const inRange = (side, i) => dragSide === side && dragFrom != null &&
+  const [hover, setHover] = React.useState(null); // { side, r }
+  const dragging = dragFrom != null;
+  const inRange = (i) => dragging &&
     i >= Math.min(dragFrom, dragTo) && i <= Math.max(dragFrom, dragTo);
   const endDrag = () => {
     if (dragFrom == null) return;
@@ -49,9 +51,9 @@ function ReviewScreen(props) {
     onOpenLine(side, f);
   };
 
-  // thread lookup keyed by side + row
-  const threadByKey = {};
-  threads.forEach((t) => { threadByKey[(t.side || 'old') + ':' + t.lineN] = t; });
+  // thread lookup keyed by row
+  const threadByRow = {};
+  threads.forEach((t) => { threadByRow[t.lineN] = t; });
 
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -83,26 +85,23 @@ function ReviewScreen(props) {
     </button>
   );
 
-  // one side (old/new) of a split row — owns its own drag / hover / + affordance
-  const Half = ({ cell, kind, side, r }) => {
+  // one side (old/new) of a split row. Selection highlight is row-wide; the
+  // + affordance and a collapsed thread's badge are per-side (this column).
+  const Half = ({ cell, kind, side, r, active, isFirst, isLast, thread }) => {
     const isChange = kind === 'change';
     const tone = side === 'old' ? 'del' : 'add';
     const filled = !!cell;
-    const active = inRange(side, r);
-    const lo = Math.min(dragFrom, dragTo), hi = Math.max(dragFrom, dragTo);
-    const isFirst = active && r === lo;
-    const isLast = active && r === hi;
-    const showPlus = filled && ((dragSide == null && hoverSide === side && hoverRow === r) ||
-      (dragSide === side && dragTo === r));
+    const showPlus = filled && !thread && ((!dragging && hover && hover.side === side && hover.r === r)
+      || (dragging && dragSide === side && dragTo === r));
     const bg = active ? 'rgba(110, 139, 255, 0.20)'
       : (isChange && filled ? `var(--diff-${tone}-bg)`
         : (isChange && !filled ? 'rgba(255,255,255,0.014)' : 'transparent'));
     const edge = active ? 'var(--accent-line)' : (isChange && filled ? `var(--diff-${tone}-edge)` : 'transparent');
     let boxShadow;
     if (active) {
-      // only the OUTER perimeter of the dragged block: left + right always,
-      // top on the first row, bottom on the last
-      const parts = ['inset 0.5px 0 0 var(--accent)', 'inset -0.5px 0 0 var(--accent)'];
+      const parts = [];
+      if (side === 'old') parts.push('inset 0.5px 0 0 var(--accent)');
+      else parts.push('inset -0.5px 0 0 var(--accent)');
       if (isFirst) parts.push('inset 0 0.5px 0 var(--accent)');
       if (isLast) parts.push('inset 0 -0.5px 0 var(--accent)');
       boxShadow = parts.join(', ');
@@ -111,8 +110,9 @@ function ReviewScreen(props) {
     }
     const sign = isChange && filled ? (side === 'old' ? '−' : '+') : '';
     const handlers = filled ? {
-      onMouseEnter: () => { if (dragSide != null) { if (dragSide === side) setDragTo(r); } else { setHoverSide(side); setHoverRow(r); } },
-      onMouseLeave: () => { if (dragSide == null) setHoverSide((s) => (s === side ? null : s)); },
+      onMouseEnter: () => { if (dragging) { setDragTo(r); } else { setHover({ side, r }); } },
+      onMouseLeave: () => { if (!dragging) setHover((h) => (h && h.side === side && h.r === r ? null : h)); },
+      onMouseDown: (e) => { if (!thread) { e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); } },
     } : {};
     return (
       <div {...handlers} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '20px 30px 12px 1fr',
@@ -123,13 +123,13 @@ function ReviewScreen(props) {
         {showPlus && (
           <button
             onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); }}
-            title={side === 'old' ? 'Comment on the before (drag to select)' : 'Comment on the after (drag to select)'}
+            title="Comment on this line (drag to select a range)"
             style={{ position: 'absolute', zIndex: 4, left: 1, top: '50%', transform: 'translateY(-50%)',
               width: 20, height: 20, borderRadius: 'var(--radius-sm)',
-              cursor: dragSide != null ? 'grabbing' : 'pointer',
+              cursor: dragging ? 'grabbing' : 'pointer',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               background: 'var(--accent)', border: 'none', color: '#fff',
-              pointerEvents: dragSide != null ? 'none' : 'auto',
+              pointerEvents: dragging ? 'none' : 'auto',
               boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               strokeWidth="3.8" strokeLinecap="round"><path d="M12 4v16M4 12h16" /></svg>
@@ -239,29 +239,45 @@ function ReviewScreen(props) {
             </div>
 
             {/* Split diff */}
-            <div style={{ overflowY: 'auto', padding: '8px 0', flex: 1, userSelect: 'none',
+            <div onMouseLeave={() => { if (!dragging) setHover(null); }}
+              style={{ overflowY: 'auto', padding: '8px 0', flex: 1, userSelect: 'none',
               background: 'var(--surface-inset)' }}>
               {rows.map((row, r) => {
-                const leftThread = threadByKey['old:' + r];
-                const rightThread = threadByKey['new:' + r];
+                const thread = threadByRow[r];
+                const active = inRange(r);
+                const lo = dragging ? Math.min(dragFrom, dragTo) : -1;
+                const hi = dragging ? Math.max(dragFrom, dragTo) : -1;
+                const isFirst = active && r === lo;
+                const isLast = active && r === hi;
                 return (
                   <React.Fragment key={r}>
                     <div data-line={r} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
-                      <Half cell={row.left} kind={row.kind} side="old" r={r} />
-                      <Half cell={row.right} kind={row.kind} side="new" r={r} />
+                      <Half cell={row.left} kind={row.kind} side="old" r={r}
+                        active={active} isFirst={isFirst} isLast={isLast} thread={thread} />
+                      <Half cell={row.right} kind={row.kind} side="new" r={r}
+                        active={active} isFirst={isFirst} isLast={isLast} thread={thread} />
                     </div>
-                    {leftThread && (
+                    {thread && thread.open && (
                       <div style={{ padding: '8px 28px 12px 52px' }}>
-                        <Thread messages={leftThread.messages} resolved={leftThread.resolved}
-                          collapsed={!leftThread.open} onToggle={() => onOpenLine('old', r)}
-                          onResolve={() => onResolve(leftThread.id)} onSend={(t) => onSend(leftThread.id, t)} />
+                        <Thread messages={thread.messages} resolved={thread.resolved}
+                          collapsed={false} onToggle={() => onOpenLine(thread.side || 'old', r)}
+                          onResolve={() => onResolve(thread.id)} onSend={(t) => onSend(thread.id, t)} />
                       </div>
                     )}
-                    {rightThread && (
-                      <div style={{ padding: '8px 28px 12px 52px' }}>
-                        <Thread messages={rightThread.messages} resolved={rightThread.resolved}
-                          collapsed={!rightThread.open} onToggle={() => onOpenLine('new', r)}
-                          onResolve={() => onResolve(rightThread.id)} onSend={(t) => onSend(rightThread.id, t)} />
+                    {thread && !thread.open && (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+                        {(thread.side || 'old') === 'old'
+                          ? <div style={{ padding: '6px 0 8px 52px' }}>
+                              <Thread messages={thread.messages} resolved={thread.resolved}
+                                collapsed onToggle={() => onOpenLine('old', r)} />
+                            </div>
+                          : <span />}
+                        {(thread.side || 'old') === 'new'
+                          ? <div style={{ padding: '6px 0 8px 52px' }}>
+                              <Thread messages={thread.messages} resolved={thread.resolved}
+                                collapsed onToggle={() => onOpenLine('new', r)} />
+                            </div>
+                          : <span />}
                       </div>
                     )}
                   </React.Fragment>

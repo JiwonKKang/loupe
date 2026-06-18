@@ -14,7 +14,7 @@
 //!     empty symbol slice).
 
 use super::gitdiff::{DiffLine, FileDiff, FileStatus, LineKind};
-use super::model::{ReviewCard, ReviewLine, T_ADD, T_CTX, T_DEL};
+use super::model::{ChangeType, ReviewCard, ReviewLine, SymbolKind, T_ADD, T_CTX, T_DEL};
 use super::symbols::Symbol;
 use std::collections::BTreeMap;
 
@@ -99,6 +99,56 @@ pub fn build_file_cards(file: &FileDiff, symbols: &[Symbol], out: &mut Vec<Revie
     }
 }
 
+/// One changed symbol of a file, paired with the **same stable card id** Stage-1 would
+/// mint for it. Used by the Stage-② relation/seed layer so relations speak in real card
+/// ids (no duplicated id logic, no drift). `sym_idx` indexes the caller's `symbols`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChangedSymbolRef {
+    pub sym_idx: usize,
+    pub card_id: String,
+}
+
+/// Return the changed symbols of one file (add/del attributed, ctx never counts) with
+/// their stable card ids — the exact ids `build_file_cards` would emit for the
+/// per-symbol case (≥2 changed symbols). For a file with 0/1 changed symbols Stage-1
+/// emits a whole-file card, so this still reports the changed symbol(s) with their
+/// per-symbol id; the relation layer only ever forms *pairs* (needs ≥2), so a lone
+/// changed symbol yields no intra-file relation regardless. Multi-run (M11) symbols use
+/// the plain (first-run) id here — relations are per-symbol, not per-run.
+///
+/// File-level concerns (binary/deleted/added) carry no symbol relations and return empty.
+pub fn changed_symbols_for_relations(file: &FileDiff, symbols: &[Symbol]) -> Vec<ChangedSymbolRef> {
+    if file.is_binary
+        || file.status == FileStatus::Deleted
+        || file.status == FileStatus::Added
+        || symbols.is_empty()
+    {
+        return Vec::new();
+    }
+
+    let attribution = attribute_changes(&file.lines, symbols);
+    let mut changed_symbol_idxs: Vec<usize> = attribution
+        .iter()
+        .zip(file.lines.iter())
+        .filter_map(|(a, l)| match (a, l.kind) {
+            (Some(idx), LineKind::Add | LineKind::Del) => Some(*idx),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    changed_symbol_idxs.sort_by_key(|&i| symbols[i].start_row);
+
+    let dup_counts = duplicate_name_counts(symbols, &changed_symbol_idxs);
+    changed_symbol_idxs
+        .into_iter()
+        .map(|sym_idx| ChangedSymbolRef {
+            sym_idx,
+            card_id: stable_symbol_id(file, &symbols[sym_idx], &dup_counts),
+        })
+        .collect()
+}
+
 /// For each diff line, the index of the symbol it belongs to (None = outside any
 /// symbol / orphan). ctx lines that are not adjacent to a change are still
 /// attributed so that the symbol's contiguous range is known.
@@ -162,16 +212,18 @@ fn innermost_symbol(symbols: &[Symbol], row: usize) -> Option<usize> {
     best
 }
 
-/// Count duplicate qualified names among the changed symbols, so we can append a
-/// stable suffix. Keyed by name; value = sorted list of start_rows (the stable
-/// disambiguator — M3).
+/// Count duplicate names among the changed symbols, so we can append a stable
+/// suffix. Keyed by the bare `name` (NOT `qualified`) so the id key is independent of
+/// the deferred `qualified` normalization (m4) — when `qualified` later becomes
+/// "Class.method", card ids (and therefore caches) stay put. Value = sorted list of
+/// start_rows (the stable disambiguator — M3).
 fn duplicate_name_counts(
     symbols: &[Symbol],
     changed: &[usize],
 ) -> BTreeMap<String, Vec<usize>> {
     let mut map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for &i in changed {
-        map.entry(symbols[i].qualified.clone())
+        map.entry(symbols[i].name.clone())
             .or_default()
             .push(symbols[i].start_row);
     }
@@ -236,6 +288,7 @@ fn push_symbol_cards(
             id = format!("{}#{}", id, gutter);
         }
 
+        let (adds_n, dels_n) = count_add_del(&lines);
         out.push(ReviewCard {
             id,
             chapter: basename(&file.new_path),
@@ -244,6 +297,12 @@ fn push_symbol_cards(
             status: "pending".into(),
             summary,
             lines,
+            // Stage-2: qualified mirrors `symbol` for now (real normalization is ②);
+            // it is NOT part of the id, so it can change later without moving caches.
+            qualified: sym.qualified.clone(),
+            change_type: line_change_type(adds_n, dels_n),
+            kind: SymbolKind::Function,
+            ..Default::default()
         });
     }
 }
@@ -335,14 +394,19 @@ fn whole_file_card(file: &FileDiff) -> ReviewCard {
     let lines = render_lines(&file.lines);
     let (adds, dels) = count_add_del(&lines);
     let summary = file_summary(&file.new_path, file.status, adds, dels);
+    let name = basename(&file.new_path);
     ReviewCard {
         id: file_id(&file.new_path),
-        chapter: basename(&file.new_path),
-        symbol: basename(&file.new_path),
+        chapter: name.clone(),
+        symbol: name.clone(),
         path: file.new_path.clone(),
         status: "pending".into(),
         summary,
         lines,
+        qualified: name,
+        change_type: file_change_type(file.status),
+        kind: SymbolKind::File,
+        ..Default::default()
     }
 }
 
@@ -358,14 +422,19 @@ fn orphan_file_card(file: &FileDiff, attribution: &[Option<usize>]) -> ReviewCar
     let lines = render_lines(&orphan_lines);
     let (adds, dels) = count_add_del(&lines);
     let summary = file_summary(&file.new_path, file.status, adds, dels);
+    let name = basename(&file.new_path);
     ReviewCard {
         id: file_id(&file.new_path),
-        chapter: basename(&file.new_path),
-        symbol: basename(&file.new_path),
+        chapter: name.clone(),
+        symbol: name.clone(),
         path: file.new_path.clone(),
         status: "pending".into(),
         summary,
         lines,
+        qualified: name,
+        change_type: file_change_type(file.status),
+        kind: SymbolKind::File,
+        ..Default::default()
     }
 }
 
@@ -393,14 +462,19 @@ fn deleted_file_card(file: &FileDiff) -> ReviewCard {
         dels,
         plural(dels)
     );
+    let name = basename(&file.old_path);
     ReviewCard {
         id: file_id(&file.old_path),
-        chapter: basename(&file.old_path),
-        symbol: basename(&file.old_path),
+        chapter: name.clone(),
+        symbol: name.clone(),
         path: file.old_path.clone(),
         status: "pending".into(),
         summary,
         lines,
+        qualified: name,
+        change_type: ChangeType::Deleted,
+        kind: SymbolKind::File,
+        ..Default::default()
     }
 }
 
@@ -426,14 +500,19 @@ fn binary_card(file: &FileDiff) -> ReviewCard {
         FileStatus::Deleted => "Removes binary file",
         FileStatus::Modified => "Changes binary file",
     };
+    let name = basename(&file.new_path);
     ReviewCard {
         id: file_id(&file.new_path),
-        chapter: basename(&file.new_path),
-        symbol: basename(&file.new_path),
+        chapter: name.clone(),
+        symbol: name.clone(),
         path: file.new_path.clone(),
         status: "pending".into(),
-        summary: format!("{} {}.", verb, basename(&file.new_path)),
+        summary: format!("{} {}.", verb, name),
         lines: Vec::new(),
+        qualified: name,
+        change_type: file_change_type(file.status),
+        kind: SymbolKind::File,
+        ..Default::default()
     }
 }
 
@@ -441,13 +520,18 @@ fn binary_card(file: &FileDiff) -> ReviewCard {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Stable card id from `path + name (+ @pos)`. Keyed by the bare `name` and the
+/// symbol's `start_row` position, NEVER by `qualified` (m4): the deferred
+/// qualified-name normalization (Stage ②) must not move existing ids or invalidate
+/// caches. While `qualified == name` (Stage-1) this yields exactly the historical
+/// ids, so the 26 existing tests are unaffected.
 fn stable_symbol_id(
     file: &FileDiff,
     sym: &Symbol,
     dup_counts: &BTreeMap<String, Vec<usize>>,
 ) -> String {
-    let base = format!("{}::{}", file.new_path, sym.qualified);
-    match dup_counts.get(&sym.qualified) {
+    let base = format!("{}::{}", file.new_path, sym.name);
+    match dup_counts.get(&sym.name) {
         // Suffix only when the same name appears more than once. The suffix is the
         // 0-base position of this symbol's start_row within the sorted start_rows
         // of its same-named siblings — a stable key invariant to card ordering (M3).
@@ -461,6 +545,26 @@ fn stable_symbol_id(
 
 fn file_id(path: &str) -> String {
     format!("{}::{}", path, FILE_SYMBOL)
+}
+
+/// Derive a symbol-card `change_type` from its add/del line counts: pure additions =>
+/// Added, pure deletions => Deleted, otherwise Modified. (Stage-2 metadata only; the
+/// statistical `summary` is unaffected.)
+fn line_change_type(adds: usize, dels: usize) -> ChangeType {
+    match (adds > 0, dels > 0) {
+        (true, false) => ChangeType::Added,
+        (false, true) => ChangeType::Deleted,
+        _ => ChangeType::Modified,
+    }
+}
+
+/// Map a file-level `FileStatus` onto the card `change_type`.
+fn file_change_type(status: FileStatus) -> ChangeType {
+    match status {
+        FileStatus::Added => ChangeType::Added,
+        FileStatus::Deleted => ChangeType::Deleted,
+        FileStatus::Modified => ChangeType::Modified,
+    }
 }
 
 fn basename(path: &str) -> String {

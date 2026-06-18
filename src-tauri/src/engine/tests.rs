@@ -101,6 +101,245 @@ fn lang_from_path_dispatch() {
 }
 
 // ---------------------------------------------------------------------------
+// (a.2) extract_with_refs — per-language reference capture (B1 asymmetry)
+// ---------------------------------------------------------------------------
+
+/// Collect every call ident attributed to a given symbol name.
+fn calls_of<'a>(
+    syms: &[Symbol],
+    refs: &'a [symbols::SymbolRefs],
+    name: &str,
+) -> Vec<&'a str> {
+    let idx = syms.iter().position(|s| s.name == name).expect("symbol present");
+    refs[idx].calls.iter().map(|h| h.ident.as_str()).collect()
+}
+
+#[test]
+fn rust_extract_with_refs_collects_calls_and_impls() {
+    // Rust tags.scm: reference.call + reference.implementation, NO reference.type.
+    let src = "\
+struct Repo;
+
+trait Store {
+    fn save(&self);
+}
+
+impl Store for Repo {
+    fn save(&self) {
+        helper();
+    }
+}
+
+fn helper() {}
+
+fn run() {
+    let r = Repo;
+    r.save();
+}
+";
+    let (syms, refs) = symbols::extract_with_refs(Lang::Rust, src)
+        .unwrap()
+        .expect("parses");
+    // `run` calls `save` (field-expression call) — present in calls.
+    let run_calls = calls_of(&syms, &refs, "run");
+    assert!(run_calls.contains(&"save"), "run calls: {run_calls:?}");
+    // `save` (the method) calls `helper`.
+    let save_calls = calls_of(&syms, &refs, "save");
+    assert!(save_calls.contains(&"helper"), "save calls: {save_calls:?}");
+
+    // impl reference: the `impl Store for Repo` block attributes a `Store` impl ref.
+    // It is attributed to whichever symbol encloses the impl header row (the method
+    // `save` is the innermost def starting after the impl line, so the impl ref lands
+    // on no symbol unless the impl header row sits inside one). Assert the IMPL bucket
+    // somewhere carries `Store` OR `Repo` — i.e. impls are collected for Rust at all.
+    let any_impl: Vec<&str> = refs
+        .iter()
+        .flat_map(|r| r.impls.iter().map(|h| h.ident.as_str()))
+        .collect();
+    assert!(
+        any_impl.contains(&"Store") || any_impl.contains(&"Repo"),
+        "Rust impl refs should be collected (B1): {any_impl:?}"
+    );
+    // Rust type_refs come ONLY from the header walk (tags.scm has none). `run`'s body
+    // `let r = Repo;` is NOT a header type, so run has no type_refs from the header.
+    let run_idx = syms.iter().position(|s| s.name == "run").unwrap();
+    assert!(
+        refs[run_idx].type_refs.iter().all(|h| h.in_header),
+        "Rust type_refs must all be header-derived"
+    );
+}
+
+#[test]
+fn rust_header_type_refs_recovered_for_signature() {
+    // B1 Rust gap: signature types are recovered via the header walk, not tags.scm.
+    let src = "\
+struct Money;
+
+fn price(items: Money) -> Money {
+    let _ = items;
+    Money
+}
+";
+    let (syms, refs) = symbols::extract_with_refs(Lang::Rust, src)
+        .unwrap()
+        .expect("parses");
+    let price_idx = syms.iter().position(|s| s.name == "price").unwrap();
+    let header_types: Vec<&str> = refs[price_idx]
+        .type_refs
+        .iter()
+        .filter(|h| h.in_header)
+        .map(|h| h.ident.as_str())
+        .collect();
+    assert!(
+        header_types.contains(&"Money"),
+        "signature type `Money` recovered: {header_types:?}"
+    );
+}
+
+#[test]
+fn go_extract_with_refs_collects_calls_and_types_no_impls() {
+    // Go tags.scm: reference.call + reference.type, NO reference.implementation.
+    let src = "\
+package main
+
+type Session struct {
+\ttoken string
+}
+
+func (s *Session) Validate() error {
+\thelper()
+\treturn nil
+}
+
+func helper() {}
+
+func use() Session {
+\tvar s Session
+\treturn s
+}
+";
+    let (syms, refs) = symbols::extract_with_refs(Lang::Go, src)
+        .unwrap()
+        .expect("parses");
+    // Validate calls helper.
+    let v_calls = calls_of(&syms, &refs, "Validate");
+    assert!(v_calls.contains(&"helper"), "Validate calls: {v_calls:?}");
+    // Go has type_refs (reference.type) — `use` references the `Session` type.
+    let any_type: Vec<&str> = refs
+        .iter()
+        .flat_map(|r| r.type_refs.iter().map(|h| h.ident.as_str()))
+        .collect();
+    assert!(any_type.contains(&"Session"), "Go type refs: {any_type:?}");
+    // Go has NO impls bucket — must always be empty (B1 asymmetry).
+    assert!(
+        refs.iter().all(|r| r.impls.is_empty()),
+        "Go must have empty impls (grammar has no reference.implementation)"
+    );
+}
+
+#[test]
+fn java_extract_with_refs_collects_calls_and_class_no_type() {
+    // Java tags.scm: reference.call + reference.class + reference.implementation,
+    // NO reference.type. `reference.call` sits on argument_list — the ident is @name.
+    let src = "\
+class Foo {
+    void run() {
+        helper();
+        Bar b = new Bar();
+    }
+    void helper() {}
+}
+";
+    let (syms, refs) = symbols::extract_with_refs(Lang::Java, src)
+        .unwrap()
+        .expect("parses");
+    // run() calls helper() — the call ident comes from @name, not the argument_list.
+    let run_calls = calls_of(&syms, &refs, "run");
+    assert!(run_calls.contains(&"helper"), "run calls: {run_calls:?}");
+    // Java type_refs come from reference.class (object creation `new Bar()`).
+    let any_type: Vec<&str> = refs
+        .iter()
+        .flat_map(|r| r.type_refs.iter().map(|h| h.ident.as_str()))
+        .collect();
+    assert!(
+        any_type.contains(&"Bar"),
+        "Java reference.class -> type_refs: {any_type:?}"
+    );
+}
+
+#[test]
+fn java_impl_reference_from_implements() {
+    // Java `implements` produces reference.implementation via type_list.
+    let src = "\
+interface Store {}
+class Repo implements Store {
+    void save() {}
+}
+";
+    let (_syms, refs) = symbols::extract_with_refs(Lang::Java, src)
+        .unwrap()
+        .expect("parses");
+    let any_impl: Vec<&str> = refs
+        .iter()
+        .flat_map(|r| r.impls.iter().map(|h| h.ident.as_str()))
+        .collect();
+    // The `implements Store` ref is attributed to whatever symbol encloses its row.
+    // It may be the class `Repo` (the type_list sits on the class header row). Assert
+    // the impl bucket is populated for Java at all.
+    assert!(
+        any_impl.contains(&"Store") || refs.iter().any(|r| !r.impls.is_empty()),
+        "Java impl refs should be collected: {any_impl:?}"
+    );
+}
+
+#[test]
+fn extract_with_refs_parser_error_returns_none() {
+    // Safe degradation: parser ERROR => Ok(None) => no symbols, no relations.
+    let src = "func broken( {\n";
+    assert!(symbols::extract_with_refs(Lang::Go, src).unwrap().is_none());
+}
+
+#[test]
+fn symbol_owners_rust_impl_method() {
+    let src = "\
+struct Repo;
+impl Repo {
+    fn save(&self) {}
+}
+";
+    let syms = symbols::extract(Lang::Rust, src).unwrap().unwrap();
+    let owners = symbols::symbol_owners(Lang::Rust, src, &syms);
+    let save_idx = syms.iter().position(|s| s.name == "save").unwrap();
+    assert_eq!(owners[save_idx].as_deref(), Some("Repo"));
+}
+
+#[test]
+fn symbol_owners_go_receiver() {
+    let src = "\
+package main
+type Session struct{}
+func (s *Session) Validate() {}
+";
+    let syms = symbols::extract(Lang::Go, src).unwrap().unwrap();
+    let owners = symbols::symbol_owners(Lang::Go, src, &syms);
+    let v_idx = syms.iter().position(|s| s.name == "Validate").unwrap();
+    assert_eq!(owners[v_idx].as_deref(), Some("Session"));
+}
+
+#[test]
+fn symbol_owners_java_class_method() {
+    let src = "\
+class Foo {
+    int bar() { return 1; }
+}
+";
+    let syms = symbols::extract(Lang::Java, src).unwrap().unwrap();
+    let owners = symbols::symbol_owners(Lang::Java, src, &syms);
+    let bar_idx = syms.iter().position(|s| s.name == "bar").unwrap();
+    assert_eq!(owners[bar_idx].as_deref(), Some("Foo"));
+}
+
+// ---------------------------------------------------------------------------
 // helpers for synthetic FileDiff construction
 // ---------------------------------------------------------------------------
 
@@ -698,6 +937,75 @@ fn serialized_card_has_exact_contract_keys() {
     assert_eq!(v["status"], "pending");
 }
 
+#[test]
+fn stage2_card_fields_serialize_as_camelcase_without_disturbing_stage1_keys() {
+    // m1: the new ReviewCard fields must come out camelCase (clusterId / changeType /
+    // aiSummary / qualified / kind) while the Stage-1 keys (chapter, summary, …) and
+    // ReviewLine's n/t/c are untouched. The defaults are present and serializable.
+    let file = FileDiff {
+        new_path: "pkg/x.go".into(),
+        old_path: "pkg/x.go".into(),
+        new_source: String::new(),
+        old_source: String::new(),
+        status: FileStatus::Modified,
+        is_binary: false,
+        lines: vec![
+            line(LineKind::Ctx, Some(1), Some(1), "func foo() {"),
+            line(LineKind::Add, Some(2), None, "\treturn 1"),
+            line(LineKind::Ctx, Some(3), Some(2), "}"),
+            line(LineKind::Ctx, Some(5), Some(4), "func bar() {"),
+            line(LineKind::Add, Some(6), None, "\treturn 2"),
+            line(LineKind::Ctx, Some(7), Some(5), "}"),
+        ],
+    };
+    let symbols = vec![sym("foo", 0, 2), sym("bar", 4, 6)];
+    let mut out = Vec::new();
+    build_file_cards(&file, &symbols, &mut out);
+    let v = serde_json::to_value(&out[0]).unwrap();
+    let obj = v.as_object().unwrap();
+    // New fields, camelCased.
+    for key in ["clusterId", "kind", "qualified", "changeType", "aiSummary"] {
+        assert!(obj.contains_key(key), "card missing camelCase key {key}");
+    }
+    // chapter is preserved (App.jsx / ProgressSpine depend on it).
+    assert_eq!(v["chapter"], "x.go");
+    // Defaults: no cluster yet, function kind, qualified mirrors name. The "foo" card
+    // is pure additions, so change_type derives to Added (camelCased to "added").
+    assert_eq!(v["clusterId"], serde_json::Value::Null);
+    assert_eq!(v["kind"], "function");
+    assert_eq!(v["changeType"], "added");
+    assert_eq!(v["qualified"], "foo");
+    assert_eq!(v["aiSummary"], serde_json::Value::Null);
+}
+
+#[test]
+fn review_data_serializes_stage2_fields_as_camelcase() {
+    // m1: ReviewData's new fields are camelCase (clusterOrder / orderedCardIds /
+    // headSha / baseSha / mergeSuggestions / splitSuggestions / jitDefs) and `cards`
+    // is unchanged. A Stage-1-only build_review fills everything else with defaults.
+    let data = super::model::ReviewData::default();
+    let v = serde_json::to_value(&data).unwrap();
+    let obj = v.as_object().unwrap();
+    for key in [
+        "cards",
+        "clusters",
+        "clusterOrder",
+        "orderedCardIds",
+        "unclustered",
+        "jitDefs",
+        "headSha",
+        "baseSha",
+        "analysis",
+        "mergeSuggestions",
+        "splitSuggestions",
+    ] {
+        assert!(obj.contains_key(key), "ReviewData missing key {key}");
+    }
+    // Default analysis state is "idle" (Stage-1 only, no AI overlay yet).
+    assert_eq!(v["analysis"], "idle");
+    assert!(v["cards"].as_array().unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // (d) end-to-end through real git2 on a tempfile mini Go repo
 // ---------------------------------------------------------------------------
@@ -883,4 +1191,109 @@ fn list_branches_errors_on_non_repo() {
     let dir = tempfile::tempdir().unwrap();
     // An empty temp dir is not a git repo => Err (surfaced as String to the UI).
     assert!(super::list_branches(dir.path().to_str().unwrap()).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// (f) analyze_relations end-to-end on a synthetic Rust repo (real git2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_analyze_relations_rust_call_chain() {
+    use git2::{Repository, Signature};
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let sig = Signature::now("Tester", "tester@example.com").unwrap();
+
+    // base: two free functions, one calls the other.
+    let path = dir.path().join("svc.rs");
+    fs::write(
+        &path,
+        "fn validate() -> bool {\n    true\n}\n\nfn create() -> bool {\n    validate()\n}\n",
+    )
+    .unwrap();
+    let base_oid = {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("svc.rs")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap()
+    };
+
+    // target: change BOTH functions so both are changed symbols; create() still calls
+    // validate() => a direct-call STRONG relation between the two changed cards.
+    let base_commit = repo.find_commit(base_oid).unwrap();
+    repo.branch("main", &base_commit, true).unwrap();
+    repo.branch("target", &base_commit, false).unwrap();
+    repo.set_head("refs/heads/target").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+    fs::write(
+        &path,
+        "fn validate() -> bool {\n    false\n}\n\nfn create() -> bool {\n    validate() && true\n}\n",
+    )
+    .unwrap();
+    {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("svc.rs")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(base_oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "change both", &tree, &[&parent]).unwrap();
+    }
+
+    let a = super::analyze_relations(dir.path().to_str().unwrap(), "main", "target").unwrap();
+    // Two changed symbols.
+    assert_eq!(a.changed.len(), 2, "changed: {:?}", a.changed);
+    // create() calls validate() (both changed) => exactly one strong pair.
+    assert_eq!(a.hints.strong.len(), 1, "strong: {:?}", a.hints.strong);
+    // The strong pair seeds them into ONE component.
+    assert_eq!(a.seeds.len(), 1, "seeds: {:?}", a.seeds);
+    assert_eq!(a.seeds[0].card_ids.len(), 2);
+    // Every changed card is covered by a seed (nothing dropped).
+    let covered: usize = a.seeds.iter().map(|s| s.card_ids.len()).sum();
+    assert_eq!(covered, a.changed.len());
+}
+
+#[test]
+fn e2e_analyze_relations_unsupported_lang_is_empty() {
+    use git2::{Repository, Signature};
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let sig = Signature::now("Tester", "tester@example.com").unwrap();
+
+    fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+    let base_oid = {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("a.txt")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap()
+    };
+    let base_commit = repo.find_commit(base_oid).unwrap();
+    repo.branch("main", &base_commit, true).unwrap();
+    repo.branch("target", &base_commit, false).unwrap();
+    repo.set_head("refs/heads/target").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+    fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+    {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("a.txt")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(base_oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "edit", &tree, &[&parent]).unwrap();
+    }
+
+    // Unsupported language => no symbols, no relations, no seeds (safe degradation).
+    let a = super::analyze_relations(dir.path().to_str().unwrap(), "main", "target").unwrap();
+    assert!(a.changed.is_empty());
+    assert!(a.hints.strong.is_empty() && a.hints.weak.is_empty());
+    assert!(a.seeds.is_empty());
 }

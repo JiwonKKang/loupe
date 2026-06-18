@@ -1,4 +1,4 @@
-/* Loupe UI kit — review summary: verdict tallies + unresolved threads as a
+/* Loupe UI kit — review summary: verdict tallies + change requests as a
    markdown todo checklist, with "Copy all". */
 
 import React from 'react';
@@ -24,6 +24,12 @@ export default function SummaryScreen(props) {
     return c.path + (ln ? ':' + ln.n : '');
   };
 
+  // Action items = every change request (⌘⏎ command) left across all threads.
+  const commands = [];
+  threads.forEach((t) => t.messages.forEach((m) => {
+    if (m.kind === 'command') commands.push({ text: m.text, symbol: t.symbol, ref: refOf(t) });
+  }));
+
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
@@ -36,8 +42,8 @@ export default function SummaryScreen(props) {
     `- Passed: ${passed}`,
     `- Needs attention: ${flagged}`,
     '',
-    '### Open threads',
-    ...open.map((t) => `- [ ] ${t.symbol} (${refOf(t)}) — ${t.messages[0] ? t.messages[0].text : 'follow up'}`),
+    '### Change requests',
+    ...(commands.length ? commands.map((c) => `- [ ] ${c.symbol} (${c.ref}) — ${c.text}`) : ['- none']),
   ].join('\n');
 
   return (
@@ -68,10 +74,11 @@ export default function SummaryScreen(props) {
           ))}
         </div>
 
-        {/* todo checklist */}
+        {/* action items — the change requests left during review */}
         <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
           <span style={{ font: 'var(--weight-semibold) var(--text-md)/1 var(--font-ui)',
-            color: 'var(--text-primary)' }}>Follow-ups</span>
+            color: 'var(--text-primary)' }}>Change requests</span>
+          <span style={{ marginLeft: 8, font: 'var(--text-sm)/1 var(--font-mono)', color: 'var(--text-faint)' }}>{commands.length}</span>
           <div style={{ marginLeft: 'auto' }}>
             <Button size="sm" variant="secondary"
               icon={copied ? <span style={{ color: 'var(--pass)' }}><Ico d={check} w={14} /></span> : <Ico d={copy} w={14} />}
@@ -83,24 +90,24 @@ export default function SummaryScreen(props) {
 
         <div style={{ background: 'var(--surface-card)', border: '1px solid var(--border-subtle)',
           borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
-          {open.length === 0 && (
+          {commands.length === 0 && (
             <div style={{ padding: '22px 22px', font: 'var(--text-base)/1.5 var(--font-ui)',
-              color: 'var(--text-tertiary)' }}>No open threads — everything resolved.</div>
+              color: 'var(--text-tertiary)' }}>No change requests — nothing to act on.</div>
           )}
-          {open.map((t, i) => (
-            <div key={t.id} style={{ display: 'flex', gap: 13, padding: '15px 22px',
+          {commands.map((c, i) => (
+            <div key={i} style={{ display: 'flex', gap: 13, padding: '15px 22px',
               borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
               <span style={{ width: 17, height: 17, borderRadius: 5, flex: 'none', marginTop: 1,
                 border: '1.5px solid var(--border-strong)' }} />
               <div style={{ minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, flexWrap: 'wrap' }}>
                   <span style={{ font: 'var(--weight-medium) var(--text-sm)/1.4 var(--font-mono)',
-                    color: 'var(--accent)' }}>{t.symbol}</span>
+                    color: 'var(--accent)' }}>{c.symbol}</span>
                   <span style={{ font: 'var(--text-xs)/1.4 var(--font-mono)',
-                    color: 'var(--text-faint)' }}>{refOf(t)}</span>
+                    color: 'var(--text-faint)' }}>{c.ref}</span>
                 </div>
                 <div style={{ font: 'var(--text-base)/1.5 var(--font-ui)', color: 'var(--text-secondary)',
-                  marginTop: 3, textWrap: 'pretty' }}>{t.messages[0] ? t.messages[0].text : 'Follow up'}</div>
+                  marginTop: 3, textWrap: 'pretty' }}>{c.text}</div>
               </div>
             </div>
           ))}

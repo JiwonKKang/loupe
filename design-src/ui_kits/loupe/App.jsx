@@ -4,13 +4,15 @@ function App() {
   const cards = window.LoupeData.cards;
   const [screen, setScreen] = React.useState('review'); // onboarding | review | summary
   const [index, setIndex] = React.useState(2);
+  const [treeOpen, setTreeOpen] = React.useState(false);
   const [dir, setDir] = React.useState(1);
   const [verdicts, setVerdicts] = React.useState({ decodeJSON: 'pass', handleLogin: 'pass' });
   const [threads, setThreads] = React.useState([
     { id: 't1', cardId: 'validate', side: 'old', lineN: 2, symbol: 'Session.Validate', open: false, resolved: false,
       messages: [
-        { author: 'you', text: 'Why drop the empty-token guard?', time: '3m' },
+        { author: 'you', text: 'Why drop the empty-token guard?', time: '3m', kind: 'question' },
         { author: 'ai', text: 'expired(now()) covers it — an unset token has a zero expiry, so it takes the same path and returns ErrLeaseExpired.', time: '3m' },
+        { author: 'you', text: 'Add a unit test for the already-expired lease case.', time: '2m', kind: 'command' },
       ] },
   ]);
   const tid = React.useRef(2);
@@ -46,20 +48,22 @@ function App() {
   };
 
   const openLine = (side, row) => {
-    const existing = threads.find((t) => t.cardId === card.id && (t.side || 'old') === side && t.lineN === row);
+    const existing = threads.find((t) => t.cardId === card.id && t.lineN === row);
     if (existing) {
       setThreads((p) => p.map((t) => t.id === existing.id ? { ...t, open: !t.open } : t));
       return;
     }
     const id = 't' + (tid.current++);
     setThreads((p) => [...p, {
-      id, cardId: card.id, side, lineN: row, symbol: card.symbol, open: true, resolved: false,
+      id, cardId: card.id, side: side || 'old', lineN: row, symbol: card.symbol, open: true, resolved: false,
       messages: [{ author: 'ai', text: aiSeed(card), time: 'now' }],
     }]);
   };
-  const sendThread = (id, text) => {
+  const sendThread = (id, text, kind) => {
     setThreads((p) => p.map((t) => t.id === id
-      ? { ...t, messages: [...t.messages, { author: 'you', text, time: 'now' }] } : t));
+      ? { ...t, messages: [...t.messages, { author: 'you', text, time: 'now', kind: kind || 'question' }] } : t));
+    // Only questions get an AI reply; commands are change requests for the summary.
+    if (kind === 'command') return;
     setTimeout(() => {
       setThreads((p) => p.map((t) => t.id === id
         ? { ...t, messages: [...t.messages, { author: 'ai', text: 'Good question — based on the surrounding change, that path is exercised by the new lease check; the previous behavior is preserved for the non-expired case.', time: 'now' }] } : t));
@@ -68,7 +72,7 @@ function App() {
   const resolveThread = (id) => setThreads((p) => p.map((t) => t.id === id ? { ...t, resolved: !t.resolved, open: false } : t));
 
   function aiSeed(c) {
-    return `This line is part of: ${c.summary.charAt(0).toLowerCase() + c.summary.slice(1)} Ask anything about the change.`;
+    return `This change: ${c.summary.charAt(0).toLowerCase() + c.summary.slice(1)} Ask a question, or ⌘⏎ to leave a change request.`;
   }
 
   // Keyboard — review screen only
@@ -89,7 +93,16 @@ function App() {
 
   return (
     <React.Fragment>
-      {screen === 'onboarding' && <Onboarding onFinish={() => setScreen('review')} />}
+      {screen === 'onboarding' && <Onboarding onFinish={() => {
+        setScreen('loading');
+        setTimeout(() => setScreen('review'), 2200);
+      }} />}
+      {screen === 'loading' && <LoupeLoader full />}
+      {screen === 'review' && (
+        <FileTree tree={window.LoupeData.tree} activeId={card.id} open={treeOpen}
+          onToggle={() => setTreeOpen((v) => !v)}
+          onSelect={(id) => { const i = cards.findIndex((c) => c.id === id); goTo(i, i > index ? 1 : -1); }} />
+      )}
       {screen === 'review' && (
         <ReviewScreen
           card={card} index={index} total={cards.length} dir={dir}
@@ -118,17 +131,25 @@ function ScreenSwitcher({ screen, setScreen }) {
   const tabs = [['onboarding', 'Onboarding'], ['review', 'Review'], ['summary', 'Summary']];
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      style={{ position: 'fixed', top: 18, right: 18, display: 'flex', gap: 2, padding: 3,
-        borderRadius: 'var(--radius-pill)', background: 'var(--bg-raised)',
-        border: '1px solid var(--border-subtle)', zIndex: 50,
-        opacity: hover ? 1 : 0.28, transition: 'var(--t-dim)' }}>
+      title="Demo: jump between screens"
+      style={{ position: 'fixed', bottom: 14, left: 14, display: 'flex', alignItems: 'center',
+        gap: hover ? 2 : 5, padding: hover ? '3px' : '5px 6px',
+        borderRadius: 'var(--radius-pill)', zIndex: 60,
+        background: hover ? 'var(--bg-raised)' : 'transparent',
+        border: `1px solid ${hover ? 'var(--border-subtle)' : 'transparent'}`,
+        opacity: hover ? 1 : 0.3, transition: 'var(--t-dim), var(--t-hover)' }}>
       {tabs.map(([k, label]) => (
-        <button key={k} onClick={() => setScreen(k)} style={{
-          padding: '6px 13px', borderRadius: 'var(--radius-pill)', cursor: 'pointer', border: 'none',
-          font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
-          background: screen === k ? 'var(--surface-overlay)' : 'transparent',
-          color: screen === k ? 'var(--text-primary)' : 'var(--text-tertiary)',
-          transition: 'var(--t-hover)' }}>{label}</button>
+        hover ? (
+          <button key={k} onClick={() => setScreen(k)} style={{
+            padding: '4px 9px', borderRadius: 'var(--radius-pill)', cursor: 'pointer', border: 'none',
+            font: 'var(--weight-medium) 10px/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
+            background: screen === k ? 'var(--surface-overlay)' : 'transparent',
+            color: screen === k ? 'var(--text-primary)' : 'var(--text-tertiary)',
+            transition: 'var(--t-hover)' }}>{label}</button>
+        ) : (
+          <span key={k} style={{ width: 5, height: 5, borderRadius: 999,
+            background: screen === k ? 'var(--text-secondary)' : 'var(--text-faint)' }} />
+        )
       ))}
     </div>
   );

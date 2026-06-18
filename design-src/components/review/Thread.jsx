@@ -17,23 +17,28 @@ export function Thread({
   const [draft, setDraft] = React.useState('');
 
   if (collapsed) {
+    const hasCommand = messages.some((m) => m.kind === 'command');
     return (
       <button onClick={onToggle} style={{
-        display: 'inline-flex', alignItems: 'center', gap: 7,
-        height: 26, padding: '0 11px', borderRadius: 'var(--radius-pill)',
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        height: 22, padding: '0 9px', borderRadius: 'var(--radius-pill)',
         background: resolved ? 'var(--surface-overlay)' : 'var(--accent-dim)',
         border: `1px solid ${resolved ? 'var(--border-default)' : 'var(--accent-line)'}`,
         color: resolved ? 'var(--text-tertiary)' : 'var(--accent)',
-        font: `var(--weight-medium) var(--text-xs)/1 var(--font-ui)`,
+        font: `var(--weight-medium) 11px/1 var(--font-ui)`,
         cursor: 'pointer',
         animation: 'loupe-thread-badge-in var(--dur-base) var(--ease-out)',
         ...style,
       }}>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
         </svg>
         {messages.length}{resolved ? ' · resolved' : ''}
+        {hasCommand && !resolved && (
+          <span title="Has a change request" style={{ width: 5, height: 5, borderRadius: 999,
+            background: 'var(--flag)', marginLeft: 1 }} />
+        )}
       </button>
     );
   }
@@ -69,33 +74,74 @@ export function Thread({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingRight: 44 }}>
         {messages.map((m, i) => {
           const ai = m.author === 'ai';
+          const command = m.kind === 'command';
+          const accent = command ? 'var(--flag)' : 'var(--accent)';
+          const label = command ? '요청' : '질문';
+          const who = ai ? 'Loupe' : (m.name || 'You');
+          const whoFg = ai ? 'var(--accent)' : 'var(--text-primary)';
           return (
             <div key={i}>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 3 }}>
-                <span style={{ font: 'var(--weight-semibold) var(--text-sm)/1.2 var(--font-ui)',
-                  color: ai ? 'var(--accent)' : 'var(--text-primary)' }}>{ai ? 'Loupe' : (m.name || 'You')}</span>
-                {m.time && <span style={{ font: 'var(--text-xs)/1 var(--font-ui)',
-                  color: 'var(--text-faint)' }}>{m.time}</span>}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3 }}>
+                <span style={{ font: 'var(--weight-semibold) var(--text-xs)/1.2 var(--font-ui)',
+                  color: whoFg }}>{who}</span>
+                {!ai && <span style={{ font: 'var(--weight-medium) 10px/1 var(--font-ui)', color: accent }}>{label}</span>}
               </div>
-              <div style={{ font: 'var(--text-base)/var(--leading-normal) var(--font-ui)',
-                color: 'var(--text-secondary)', textWrap: 'pretty' }}>{m.text}</div>
+              <div style={{ font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)',
+                color: ai ? 'var(--text-secondary)' : 'var(--text-primary)', textWrap: 'pretty' }}>{m.text}</div>
             </div>
           );
         })}
       </div>
 
       {!resolved && (
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && draft.trim()) { onSend && onSend(draft.trim()); setDraft(''); } }}
-          placeholder="Reply…"
-          style={{
-            width: '100%', marginTop: 12, paddingTop: 10, boxSizing: 'border-box',
-            background: 'transparent', border: 'none', borderTop: '1px solid var(--border-subtle)',
-            color: 'var(--text-primary)', font: 'var(--text-sm)/1.3 var(--font-ui)', outline: 'none',
-          }}
-        />
+        <div style={{ marginTop: 11, paddingTop: 9, borderTop: '1px solid var(--border-subtle)' }}>
+          <textarea
+            value={draft}
+            rows={1}
+            onChange={(e) => { setDraft(e.target.value);
+              e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' || e.shiftKey || !draft.trim()) return;
+              e.preventDefault();
+              const kind = (e.metaKey || e.ctrlKey) ? 'command' : 'question';
+              onSend && onSend(draft.trim(), kind);
+              setDraft(''); e.target.style.height = 'auto';
+            }}
+            placeholder="질문을 남기거나, 변경을 요청하세요…"
+            style={{
+              width: '100%', boxSizing: 'border-box', resize: 'none', overflow: 'hidden',
+              minHeight: 20, maxHeight: 160, display: 'block',
+              background: 'transparent', border: 'none',
+              color: 'var(--text-primary)', font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)', outline: 'none',
+            }}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+            <span style={{ flex: 1 }} />
+            {(() => {
+              const has = draft.trim().length > 0;
+              const send = (kind) => { if (has) { onSend && onSend(draft.trim(), kind); setDraft(''); } };
+              const btn = (label, kbd, kind, fg, bg, bd) => (
+                <button onClick={() => send(kind)} disabled={!has} title={label} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, height: 20, padding: '0 7px',
+                  borderRadius: 'var(--radius-sm)', cursor: has ? 'pointer' : 'default',
+                  background: bg, border: `1px solid ${bd}`, color: fg,
+                  opacity: has ? 1 : 0.4, transition: 'var(--t-hover)',
+                  font: 'var(--weight-medium) 10px/1 var(--font-ui)', whiteSpace: 'nowrap' }}>
+                  {label}
+                  <kbd style={{ display: 'inline-flex', alignItems: 'center', padding: '1px 3px',
+                    borderRadius: 3, background: 'rgba(0,0,0,0.18)',
+                    border: '1px solid rgba(255,255,255,0.14)', font: '8px/1 var(--font-mono)' }}>{kbd}</kbd>
+                </button>
+              );
+              return (
+                <React.Fragment>
+                  {btn('질문', '⏎', 'question', 'var(--accent)', 'var(--accent-dim)', 'var(--accent-line)')}
+                  {btn('요청', '⌘⏎', 'command', 'var(--flag)', 'var(--flag-dim)', 'var(--flag-line)')}
+                </React.Fragment>
+              );
+            })()}
+          </div>
+        </div>
       )}
     </div>
   );

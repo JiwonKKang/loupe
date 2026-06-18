@@ -8,6 +8,9 @@ import { invoke } from '@tauri-apps/api/core';
 import Onboarding from './screens/Onboarding';
 import ReviewScreen from './screens/ReviewScreen';
 import SummaryScreen from './screens/SummaryScreen';
+import { LoupeLoader } from './components/LoupeLoader';
+import { FileTree } from './components/FileTree';
+import { buildTree } from './data/fixtures';
 // Note: syntax color is a front-end concern — ReviewScreen imports highlightGo
 // from ./data/fixtures directly. App.jsx only wires data + screen state.
 
@@ -21,6 +24,7 @@ export default function App() {
   const [dir, setDir] = React.useState(1);
   const [verdicts, setVerdicts] = React.useState({});
   const [threads, setThreads] = React.useState([]);
+  const [treeOpen, setTreeOpen] = React.useState(false);
   const tid = React.useRef(1);
 
   // Load the review whenever a range is chosen (and on retry).
@@ -55,6 +59,10 @@ export default function App() {
     file: c.path.split('/').pop(), threads: threadCount(c.id),
     status: hasUnresolved(c.id) ? 'flag' : (verdicts[c.id] === 'pass' ? 'pass' : 'pending'),
   }));
+  const unresolved = threads.filter((t) => !t.resolved).length;
+  // Changed-files tree for the right-hand FileTree sidebar (built from the
+  // real cards returned by the engine).
+  const tree = React.useMemo(() => buildTree(list), [list]);
 
   const goTo = (i, d) => { setDir(d); setIndex(Math.max(0, Math.min(list.length - 1, i))); };
 
@@ -68,20 +76,24 @@ export default function App() {
 
   const openLine = (side, lineN) => {
     if (!card) return;
-    const existing = threads.find((t) => t.cardId === card.id && (t.side || 'old') === side && t.lineN === lineN);
+    // Threads are keyed by ROW now (before+after highlight together, GitHub-style);
+    // `side` is only remembered so a collapsed badge sits in that column's gutter.
+    const existing = threads.find((t) => t.cardId === card.id && t.lineN === lineN);
     if (existing) {
       setThreads((p) => p.map((t) => t.id === existing.id ? { ...t, open: !t.open } : t));
       return;
     }
     const id = 't' + (tid.current++);
     setThreads((p) => [...p, {
-      id, cardId: card.id, side, lineN, symbol: card.symbol, open: true, resolved: false,
+      id, cardId: card.id, side: side || 'old', lineN, symbol: card.symbol, open: true, resolved: false,
       messages: [{ author: 'ai', text: aiSeed(card), time: 'now' }],
     }]);
   };
-  const sendThread = (id, text) => {
+  const sendThread = (id, text, kind) => {
     setThreads((p) => p.map((t) => t.id === id
-      ? { ...t, messages: [...t.messages, { author: 'you', text, time: 'now' }] } : t));
+      ? { ...t, messages: [...t.messages, { author: 'you', text, time: 'now', kind: kind || 'question' }] } : t));
+    // Only questions get an AI reply; commands are change requests for the summary.
+    if (kind === 'command') return;
     setTimeout(() => {
       setThreads((p) => p.map((t) => t.id === id
         ? { ...t, messages: [...t.messages, { author: 'ai', text: 'Good question — based on the surrounding change, that path is exercised by the new lease check; the previous behavior is preserved for the non-expired case.', time: 'now' }] } : t));
@@ -91,7 +103,7 @@ export default function App() {
 
   function aiSeed(c) {
     const s = c.summary || 'this change.';
-    return `This line is part of: ${s.charAt(0).toLowerCase() + s.slice(1)} Ask anything about the change.`;
+    return `This change: ${s.charAt(0).toLowerCase() + s.slice(1)} Ask a question, or ⌘⏎ to leave a change request.`;
   }
 
   // Keyboard — review screen only. Declared before any early return (hooks rule).
@@ -162,9 +174,14 @@ export default function App() {
   return (
     <React.Fragment>
       {screen === 'review' && card && (
+        <FileTree tree={tree} activeId={card.id} open={treeOpen}
+          onToggle={() => setTreeOpen((v) => !v)}
+          onSelect={(id) => { const i = list.findIndex((c) => c.id === id); goTo(i, i > index ? 1 : -1); }} />
+      )}
+      {screen === 'review' && card && (
         <ReviewScreen
           card={card} index={index} total={list.length} dir={dir}
-          base={range ? range.base : 'base'} target={range ? range.target : 'target'}
+          base={range ? range.base : 'base'} target={range ? range.target : 'target'} unresolved={unresolved}
           onOpenSummary={() => setScreen('summary')}
           spineItems={spineItems} onSelect={(id) => { const i = list.findIndex((c) => c.id === id); goTo(i, i > index ? 1 : -1); }}
           verdict={verdicts[card.id]} flagged={hasUnresolved(card.id)}
@@ -194,26 +211,10 @@ function CenterPane({ children }) {
   );
 }
 
-function Dot() {
-  return (
-    <span style={{ width: 11, height: 11, borderRadius: 999, background: 'var(--accent)',
-      boxShadow: '0 0 0 5px var(--accent-dim)' }} />
-  );
-}
-
 function LoadingScreen() {
-  return (
-    <CenterPane>
-      <Dot />
-      <div style={{ font: 'var(--weight-medium) var(--text-md)/1 var(--font-ui)',
-        color: 'var(--text-secondary)', letterSpacing: 'var(--tracking-snug)' }}>
-        Reading the diff…
-      </div>
-      <div style={{ font: 'var(--text-sm)/1.5 var(--font-ui)', color: 'var(--text-tertiary)' }}>
-        Extracting changed symbols.
-      </div>
-    </CenterPane>
-  );
+  // The loading mark (steady dot + breathing halo). Shown while the engine
+  // reads the diff and extracts changed symbols.
+  return <LoupeLoader full label="Reading the diff…" />;
 }
 
 function EmptyDiffScreen({ range, onBack }) {
@@ -264,17 +265,25 @@ function ScreenSwitcher({ screen, setScreen }) {
   const tabs = [['onboarding', 'Onboarding'], ['review', 'Review'], ['summary', 'Summary']];
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      style={{ position: 'fixed', top: 18, right: 18, display: 'flex', gap: 2, padding: 3,
-        borderRadius: 'var(--radius-pill)', background: 'var(--bg-raised)',
-        border: '1px solid var(--border-subtle)', zIndex: 50,
-        opacity: hover ? 1 : 0.28, transition: 'var(--t-dim)' }}>
+      title="Demo: jump between screens"
+      style={{ position: 'fixed', bottom: 14, left: 14, display: 'flex', alignItems: 'center',
+        gap: hover ? 2 : 5, padding: hover ? '3px' : '5px 6px',
+        borderRadius: 'var(--radius-pill)', zIndex: 60,
+        background: hover ? 'var(--bg-raised)' : 'transparent',
+        border: `1px solid ${hover ? 'var(--border-subtle)' : 'transparent'}`,
+        opacity: hover ? 1 : 0.3, transition: 'var(--t-dim), var(--t-hover)' }}>
       {tabs.map(([k, label]) => (
-        <button key={k} onClick={() => setScreen(k)} style={{
-          padding: '6px 13px', borderRadius: 'var(--radius-pill)', cursor: 'pointer', border: 'none',
-          font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
-          background: screen === k ? 'var(--surface-overlay)' : 'transparent',
-          color: screen === k ? 'var(--text-primary)' : 'var(--text-tertiary)',
-          transition: 'var(--t-hover)' }}>{label}</button>
+        hover ? (
+          <button key={k} onClick={() => setScreen(k)} style={{
+            padding: '4px 9px', borderRadius: 'var(--radius-pill)', cursor: 'pointer', border: 'none',
+            font: 'var(--weight-medium) 10px/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
+            background: screen === k ? 'var(--surface-overlay)' : 'transparent',
+            color: screen === k ? 'var(--text-primary)' : 'var(--text-tertiary)',
+            transition: 'var(--t-hover)' }}>{label}</button>
+        ) : (
+          <span key={k} style={{ width: 5, height: 5, borderRadius: 999,
+            background: screen === k ? 'var(--text-secondary)' : 'var(--text-faint)' }} />
+        )
       ))}
     </div>
   );
