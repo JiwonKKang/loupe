@@ -12,10 +12,10 @@ import { highlightGo } from '../data/fixtures';
 
 export default function ReviewScreen(props) {
   const {
-    card, index, total, dir, base, target, unresolved,
+    card, index, total, dir, base, target,
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
-    onPass, onPrev, onNext, onJumpUnresolved,
+    onPass, onPrev, onNext,
     threads, onOpenLine, onResolve, onSend,
   } = props;
 
@@ -94,12 +94,26 @@ export default function ReviewScreen(props) {
     const tone = side === 'old' ? 'del' : 'add';
     const filled = !!cell;
     const active = inRange(side, r);
+    const lo = Math.min(dragFrom, dragTo), hi = Math.max(dragFrom, dragTo);
+    const isFirst = active && r === lo;
+    const isLast = active && r === hi;
     const showPlus = filled && ((dragSide == null && hoverSide === side && hoverRow === r) ||
       (dragSide === side && dragTo === r));
-    const bg = active ? 'var(--accent-dim)'
+    const bg = active ? 'rgba(110, 139, 255, 0.20)'
       : (isChange && filled ? `var(--diff-${tone}-bg)`
         : (isChange && !filled ? 'rgba(255,255,255,0.014)' : 'transparent'));
     const edge = active ? 'var(--accent-line)' : (isChange && filled ? `var(--diff-${tone}-edge)` : 'transparent');
+    let boxShadow;
+    if (active) {
+      // only the OUTER perimeter of the dragged block: left + right always,
+      // top on the first row, bottom on the last
+      const parts = ['inset 0.5px 0 0 var(--accent)', 'inset -0.5px 0 0 var(--accent)'];
+      if (isFirst) parts.push('inset 0 0.5px 0 var(--accent)');
+      if (isLast) parts.push('inset 0 -0.5px 0 var(--accent)');
+      boxShadow = parts.join(', ');
+    } else {
+      boxShadow = edge !== 'transparent' ? `inset 3px 0 0 ${edge}` : 'none';
+    }
     const sign = isChange && filled ? (side === 'old' ? '−' : '+') : '';
     const handlers = filled ? {
       onMouseEnter: () => { if (dragSide != null) { if (dragSide === side) setDragTo(r); } else { setHoverSide(side); setHoverRow(r); } },
@@ -108,22 +122,22 @@ export default function ReviewScreen(props) {
     return (
       <div {...handlers} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '20px 30px 12px 1fr',
         alignItems: 'baseline', background: bg, cursor: 'default',
-        boxShadow: edge !== 'transparent' ? `inset 3px 0 0 ${edge}` : 'none',
+        boxShadow,
         minWidth: 0, borderLeft: side === 'new' ? '1px solid var(--border-subtle)' : 'none',
         transition: 'background var(--dur-fast) var(--ease-soft)' }}>
         {showPlus && (
           <button
             onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); }}
             title={side === 'old' ? 'Comment on the before (drag to select)' : 'Comment on the after (drag to select)'}
-            style={{ position: 'absolute', zIndex: 4, left: 2, top: '50%', transform: 'translateY(-50%)',
-              width: 18, height: 18, borderRadius: 'var(--radius-sm)',
+            style={{ position: 'absolute', zIndex: 4, left: 1, top: '50%', transform: 'translateY(-50%)',
+              width: 20, height: 20, borderRadius: 'var(--radius-sm)',
               cursor: dragSide != null ? 'grabbing' : 'pointer',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              background: 'var(--accent)', border: 'none', color: 'var(--text-on-accent)',
+              background: 'var(--accent)', border: 'none', color: '#fff',
               pointerEvents: dragSide != null ? 'none' : 'auto',
               boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              strokeWidth="3" strokeLinecap="round"><path d="M12 4v16M4 12h16" /></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="3.8" strokeLinecap="round"><path d="M12 4v16M4 12h16" /></svg>
           </button>
         )}
         <span></span>
@@ -263,21 +277,11 @@ export default function ReviewScreen(props) {
           </div>
         </div>
 
-        {/* Bottom: hints + unresolved on the left, verdict actions on the RIGHT */}
+        {/* Bottom: hints on the left, verdict actions on the RIGHT */}
         <div style={{ display: 'flex', alignItems: 'center',
           padding: '0 var(--canvas-pad) 30px' }}>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            {unresolved > 0 && (
-              <button onClick={onJumpUnresolved} title="Go to a card that needs another look"
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 7, height: 32, padding: '0 13px',
-                  borderRadius: 'var(--radius-pill)', cursor: 'pointer', whiteSpace: 'nowrap', flex: 'none',
-                  background: 'var(--flag-dim)', border: '1px solid var(--flag-line)', color: 'var(--flag)',
-                  font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
-                  transition: 'var(--t-dim)' }}>
-                <Ico d={flagPath} w={14} />{unresolved} to revisit
-              </button>
-            )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 18, opacity: 'var(--dim-rest)' }}>
               <KeyHint keys={['←', '→']} label="Move" size="sm" />
               <KeyHint keys="+" label="to comment" size="sm" tone="accent" />

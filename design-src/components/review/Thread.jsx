@@ -25,7 +25,9 @@ export function Thread({
         border: `1px solid ${resolved ? 'var(--border-default)' : 'var(--accent-line)'}`,
         color: resolved ? 'var(--text-tertiary)' : 'var(--accent)',
         font: `var(--weight-medium) var(--text-xs)/1 var(--font-ui)`,
-        cursor: 'pointer', ...style,
+        cursor: 'pointer',
+        animation: 'loupe-thread-badge-in var(--dur-base) var(--ease-out)',
+        ...style,
       }}>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -38,83 +40,62 @@ export function Thread({
 
   return (
     <div style={{
-      background: 'var(--surface-overlay)', border: '1px solid var(--border-default)',
-      borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-pop)',
-      overflow: 'hidden', ...style,
+      position: 'relative',
+      background: 'var(--surface-overlay)', border: '1px solid var(--border-subtle)',
+      borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-sm)',
+      overflow: 'hidden', transformOrigin: 'top left',
+      animation: 'loupe-thread-in var(--dur-slow) var(--ease-out)',
+      padding: '12px 14px', ...style,
     }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '10px 14px', borderBottom: '1px solid var(--border-subtle)',
-      }}>
-        <button onClick={onToggle} title="Collapse thread" style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
-          background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
-          color: 'var(--text-tertiary)',
-          font: `var(--weight-medium) var(--text-xs)/1 var(--font-ui)`,
-          letterSpacing: 'var(--tracking-wide)', textTransform: 'uppercase',
-        }}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M18 15l-6-6-6 6" />
-          </svg>
-          {resolved ? 'Resolved' : 'Thread'}
+      {/* quiet top-right actions: collapse + resolve */}
+      <div style={{ position: 'absolute', top: 9, right: 10, display: 'flex', gap: 2 }}>
+        <button onClick={onToggle} title="Collapse" style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 24, height: 24, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          background: 'transparent', border: 'none', color: 'var(--text-tertiary)' }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 15l-6-6-6 6" /></svg>
         </button>
-        <button onClick={onResolve} style={{
-          display: 'inline-flex', alignItems: 'center', gap: 5,
-          background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
-          color: resolved ? 'var(--pass)' : 'var(--text-secondary)',
-          font: `var(--weight-medium) var(--text-xs)/1 var(--font-ui)`,
-        }}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20 6 9 17l-5-5" />
-          </svg>
-          {resolved ? 'Resolved' : 'Resolve'}
+        <button onClick={onResolve} title={resolved ? 'Resolved' : 'Resolve'} style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 24, height: 24, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          background: 'transparent', border: 'none',
+          color: resolved ? 'var(--pass)' : 'var(--text-tertiary)' }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
         </button>
       </div>
 
-      <div style={{ padding: '6px 14px 4px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingRight: 44 }}>
         {messages.map((m, i) => {
           const ai = m.author === 'ai';
           return (
-            <div key={i} style={{ padding: '10px 0',
-              borderTop: i ? '1px solid var(--border-subtle)' : 'none' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <span style={{
-                  width: 20, height: 20, borderRadius: 999, flex: 'none',
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  background: ai ? 'var(--accent-dim)' : 'var(--surface-card)',
-                  border: `1px solid ${ai ? 'var(--accent-line)' : 'var(--border-default)'}`,
-                  color: ai ? 'var(--accent)' : 'var(--text-secondary)',
-                  font: `var(--weight-semibold) 9px/1 var(--font-ui)`,
-                }}>{ai ? 'AI' : (m.name || 'You').slice(0, 1).toUpperCase()}</span>
-                <span style={{ font: `var(--weight-medium) var(--text-sm)/1 var(--font-ui)`,
-                  color: 'var(--text-primary)' }}>{ai ? 'Loupe AI' : (m.name || 'You')}</span>
-                {m.time && <span style={{ font: `var(--text-xs)/1 var(--font-ui)`,
+            <div key={i}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 3 }}>
+                <span style={{ font: 'var(--weight-semibold) var(--text-sm)/1.2 var(--font-ui)',
+                  color: ai ? 'var(--accent)' : 'var(--text-primary)' }}>{ai ? 'Loupe' : (m.name || 'You')}</span>
+                {m.time && <span style={{ font: 'var(--text-xs)/1 var(--font-ui)',
                   color: 'var(--text-faint)' }}>{m.time}</span>}
               </div>
-              <div style={{ font: `var(--text-base)/var(--leading-normal) var(--font-ui)`,
-                color: 'var(--text-secondary)', paddingLeft: 28 }}>{m.text}</div>
+              <div style={{ font: 'var(--text-base)/var(--leading-normal) var(--font-ui)',
+                color: 'var(--text-secondary)', textWrap: 'pretty' }}>{m.text}</div>
             </div>
           );
         })}
       </div>
 
       {!resolved && (
-        <div style={{ display: 'flex', gap: 8, padding: '10px 14px 14px',
-          borderTop: '1px solid var(--border-subtle)' }}>
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && draft.trim()) { onSend && onSend(draft.trim()); setDraft(''); } }}
-            placeholder="Ask the AI about this line…"
-            style={{
-              flex: 1, height: 34, padding: '0 12px', borderRadius: 'var(--radius-md)',
-              background: 'var(--surface-inset)', border: '1px solid var(--border-default)',
-              color: 'var(--text-primary)', font: `var(--text-sm)/1 var(--font-ui)`, outline: 'none',
-            }}
-          />
-        </div>
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && draft.trim()) { onSend && onSend(draft.trim()); setDraft(''); } }}
+          placeholder="Reply…"
+          style={{
+            width: '100%', marginTop: 12, paddingTop: 10, boxSizing: 'border-box',
+            background: 'transparent', border: 'none', borderTop: '1px solid var(--border-subtle)',
+            color: 'var(--text-primary)', font: 'var(--text-sm)/1.3 var(--font-ui)', outline: 'none',
+          }}
+        />
       )}
     </div>
   );

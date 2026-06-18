@@ -55,7 +55,6 @@ export default function App() {
     file: c.path.split('/').pop(), threads: threadCount(c.id),
     status: hasUnresolved(c.id) ? 'flag' : (verdicts[c.id] === 'pass' ? 'pass' : 'pending'),
   }));
-  const unresolved = threads.filter((t) => !t.resolved).length;
 
   const goTo = (i, d) => { setDir(d); setIndex(Math.max(0, Math.min(list.length - 1, i))); };
 
@@ -66,14 +65,6 @@ export default function App() {
   const pass = () => { if (!card) return; setVerdicts((p) => ({ ...p, [card.id]: 'pass' })); advance(); };
   const next = () => { if (index < list.length - 1) goTo(index + 1, 1); else setScreen('summary'); };
   const prev = () => { if (index > 0) goTo(index - 1, -1); };
-  const jumpUnresolved = () => {
-    const openCardIds = threads.filter((t) => !t.resolved).map((t) => t.cardId);
-    // first unresolved card after the current one, wrapping around
-    for (let step = 1; step <= list.length; step++) {
-      const i = (index + step) % list.length;
-      if (openCardIds.includes(list[i].id)) { goTo(i, i > index ? 1 : -1); return; }
-    }
-  };
 
   const openLine = (side, lineN) => {
     if (!card) return;
@@ -173,12 +164,12 @@ export default function App() {
       {screen === 'review' && card && (
         <ReviewScreen
           card={card} index={index} total={list.length} dir={dir}
-          base={range ? range.base : 'base'} target={range ? range.target : 'target'} unresolved={unresolved}
+          base={range ? range.base : 'base'} target={range ? range.target : 'target'}
           onOpenSummary={() => setScreen('summary')}
           spineItems={spineItems} onSelect={(id) => { const i = list.findIndex((c) => c.id === id); goTo(i, i > index ? 1 : -1); }}
           verdict={verdicts[card.id]} flagged={hasUnresolved(card.id)}
           hasPrev={index > 0} hasNext={index < list.length - 1}
-          onPass={pass} onPrev={prev} onNext={next} onJumpUnresolved={jumpUnresolved}
+          onPass={pass} onPrev={prev} onNext={next}
           threads={cardThreads}
           onOpenLine={openLine} onResolve={resolveThread} onSend={sendThread}
         />
