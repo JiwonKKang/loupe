@@ -9,6 +9,7 @@
 //!  - entry-point / contract / test heuristics fire on path/name only.
 
 use super::*;
+use crate::engine::basesignals::{DeletedSymbol, FileBaseSignals, RenamePair, SignatureChange};
 use crate::engine::model::{ChangeType, ClusterKind, ReviewCard, ReviewLine, SymbolKind, T_ADD};
 use crate::engine::relations::{ChangedSymbol, RelationHints, Seed};
 use crate::engine::symbols::SymbolRefs;
@@ -242,4 +243,158 @@ fn missing_card_side_degrades_without_panic() {
     assert_eq!(out[0].changed_symbols.len(), 1);
     assert_eq!(out[0].changed_symbols[0].card_id, "ghost");
     assert_eq!(out[0].changed_symbols[0].name, "ghost");
+}
+
+// ---------------------------------------------------------------------------
+// base-AST signal distribution onto cluster cards (planning §2.1 base/head)
+// ---------------------------------------------------------------------------
+
+fn sig_with(
+    deleted: Vec<DeletedSymbol>,
+    renames: Vec<RenamePair>,
+    signature_changes: Vec<SignatureChange>,
+) -> FileBaseSignals {
+    FileBaseSignals {
+        deleted,
+        renames,
+        signature_changes,
+    }
+}
+
+#[test]
+fn deleted_symbol_attached_to_seed_by_file_path() {
+    // `kept` (card a) survives in svc.go; `gone` was deleted from the same file → the
+    // deleted-symbol signal attaches to the seed that owns a card from svc.go.
+    let seeds = vec![seed("seed-1", &["a"])];
+    let changed = vec![changed("a", "kept", "svc.go", false)];
+    let cards = vec![card("a", "kept", "svc.go", SymbolKind::Function, ChangeType::Modified)];
+    let signals = sig_with(
+        vec![DeletedSymbol {
+            id: "deleted::svc.go::gone".into(),
+            name: "gone".into(),
+            path: "svc.go".into(),
+            signature: "func gone() int".into(),
+        }],
+        vec![],
+        vec![],
+    );
+    let out =
+        build_cluster_cards_with_signals(&seeds, &RelationHints::default(), &changed, &cards, &signals);
+    assert_eq!(out[0].deleted_symbols.len(), 1, "{:?}", out[0].deleted_symbols);
+    assert_eq!(out[0].deleted_symbols[0].name, "gone");
+    // The synthetic deleted id must NOT be a clustering whitelist id (not in changedSymbols).
+    assert!(
+        out[0].changed_symbols.iter().all(|s| s.card_id != "deleted::svc.go::gone"),
+        "deleted id must not become a member card id"
+    );
+}
+
+#[test]
+fn deleted_symbol_in_other_file_not_attached() {
+    // The deleted symbol lives in other.go; the seed only touches svc.go → not attached.
+    let seeds = vec![seed("seed-1", &["a"])];
+    let changed = vec![changed("a", "kept", "svc.go", false)];
+    let cards = vec![card("a", "kept", "svc.go", SymbolKind::Function, ChangeType::Modified)];
+    let signals = sig_with(
+        vec![DeletedSymbol {
+            id: "deleted::other.go::gone".into(),
+            name: "gone".into(),
+            path: "other.go".into(),
+            signature: "func gone()".into(),
+        }],
+        vec![],
+        vec![],
+    );
+    let out =
+        build_cluster_cards_with_signals(&seeds, &RelationHints::default(), &changed, &cards, &signals);
+    assert!(out[0].deleted_symbols.is_empty());
+}
+
+#[test]
+fn rename_pair_attached_and_mirrored_inline() {
+    // `newName` (card b) is the rename of `oldName` → renamePairs on the card AND
+    // renamedFrom on the changed symbol.
+    let seeds = vec![seed("seed-1", &["b"])];
+    let changed = vec![changed("b", "newName", "svc.go", false)];
+    let cards = vec![card("b", "newName", "svc.go", SymbolKind::Function, ChangeType::Modified)];
+    let signals = sig_with(
+        vec![],
+        vec![RenamePair {
+            from_name: "oldName".into(),
+            to_card_id: "b".into(),
+            to_name: "newName".into(),
+            path: "svc.go".into(),
+            basis: "body",
+        }],
+        vec![],
+    );
+    let out =
+        build_cluster_cards_with_signals(&seeds, &RelationHints::default(), &changed, &cards, &signals);
+    assert_eq!(out[0].rename_pairs.len(), 1);
+    assert_eq!(out[0].rename_pairs[0].from_name, "oldName");
+    assert_eq!(out[0].rename_pairs[0].to_card_id, "b");
+    // inline mirror
+    let s = &out[0].changed_symbols[0];
+    assert_eq!(s.renamed_from.as_deref(), Some("oldName"));
+}
+
+#[test]
+fn signature_change_attached_and_mirrored_inline() {
+    let seeds = vec![seed("seed-1", &["a"])];
+    let changed = vec![changed("a", "create", "svc.go", false)];
+    let cards = vec![card("a", "create", "svc.go", SymbolKind::Method, ChangeType::Modified)];
+    let signals = sig_with(
+        vec![],
+        vec![],
+        vec![SignatureChange {
+            card_id: "a".into(),
+            name: "create".into(),
+            path: "svc.go".into(),
+            old_signature: "func create(name string) int".into(),
+            new_signature: "func create(name string, age int) int".into(),
+        }],
+    );
+    let out =
+        build_cluster_cards_with_signals(&seeds, &RelationHints::default(), &changed, &cards, &signals);
+    assert_eq!(out[0].signature_changes.len(), 1);
+    assert!(out[0].signature_changes[0].change.contains("→"));
+    // inline mirror on the symbol
+    let s = &out[0].changed_symbols[0];
+    assert!(s.signature_change.as_deref().unwrap().contains("age int"));
+}
+
+#[test]
+fn signal_for_nonmember_card_not_attached() {
+    // A rename whose `to_card_id` is not in this seed must not attach (defensive).
+    let seeds = vec![seed("seed-1", &["a"])];
+    let changed = vec![changed("a", "kept", "svc.go", false)];
+    let cards = vec![card("a", "kept", "svc.go", SymbolKind::Function, ChangeType::Modified)];
+    let signals = sig_with(
+        vec![],
+        vec![RenamePair {
+            from_name: "old".into(),
+            to_card_id: "zzz".into(), // not a member of seed-1
+            to_name: "new".into(),
+            path: "svc.go".into(),
+            basis: "body",
+        }],
+        vec![],
+    );
+    let out =
+        build_cluster_cards_with_signals(&seeds, &RelationHints::default(), &changed, &cards, &signals);
+    assert!(out[0].rename_pairs.is_empty());
+}
+
+#[test]
+fn build_cluster_cards_without_signals_is_unchanged() {
+    // The signal-free entry point yields cards with empty base-signal fields (back-compat).
+    let seeds = vec![seed("seed-1", &["a"])];
+    let changed = vec![changed("a", "foo", "f.go", false)];
+    let cards = vec![card("a", "foo", "f.go", SymbolKind::Function, ChangeType::Modified)];
+    let out = build_cluster_cards(&seeds, &RelationHints::default(), &changed, &cards);
+    assert!(out[0].deleted_symbols.is_empty());
+    assert!(out[0].rename_pairs.is_empty());
+    assert!(out[0].signature_changes.is_empty());
+    assert!(out[0].changed_symbols[0].renamed_from.is_none());
+    assert!(out[0].changed_symbols[0].signature_change.is_none());
 }

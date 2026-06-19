@@ -33,6 +33,18 @@ a STARTING POINT, not a verdict. You are free to reconstruct them:
 (c) PLACE any unplaced symbol into the cluster whose behaviour it belongs to, then \
     finalize the meaning clusters.
 
+Some seeds also carry BASE-vs-HEAD signals (the algorithm compared the old and new code, \
+not just the diff). Use them:
+  - `renamePairs` / a symbol's `renamedFrom`: that symbol is the SAME code under a new \
+    name (its body matched a symbol deleted from the base). Treat the rename as ONE change \
+    — keep the renamed symbol in the cluster the old name belonged to; never split a rename \
+    into a separate \"new symbol\" cluster.
+  - `deletedSymbols`: symbols removed from a file that still exists. They have no card id \
+    (do NOT put them in any `memberCardIds` or in `unclustered`); use them only as context \
+    — keep the surviving change that replaced or depended on them in the related flow.
+  - a symbol's `signatureChange` (`old → new`): its contract changed before→after; cluster \
+    it with the callers/types affected by that signature.
+
 Classify each cluster's `kind` as exactly one of:
   - flow              : one user/system action end to end (entrypoint→controller→\
 usecase→domain→repo→test).
@@ -107,6 +119,13 @@ seed as a STARTING POINT, not a verdict. You may MERGE seeds that are one flow s
 analysis could not connect (event publish↔subscribe, interface↔implementation, dependency \
 injection, request→command→domain→entity→response), SPLIT a seed that is really two \
 behaviours, and PLACE any unplaced symbol where it belongs.
+
+Use the BASE-vs-HEAD signals when present: `renamePairs` / a symbol's `renamedFrom` means \
+that symbol is the SAME code renamed — keep it as ONE change in the old name's cluster, do \
+not split rename into delete+add. `deletedSymbols` (no card id — never place them in \
+`memberCardIds`/`unclustered`) are context: keep the surviving change that replaced them in \
+the related flow. A symbol's `signatureChange` (`old → new`) is a before→after contract \
+change — cluster it with the callers/types it affects.
 
 Classify each cluster's `kind` as exactly one of: flow, contract, domain-concept, \
 shared-foundation, infra.

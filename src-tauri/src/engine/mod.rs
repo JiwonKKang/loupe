@@ -7,6 +7,7 @@
 //! directly from `cargo test`.
 
 pub mod ai;
+mod basesignals;
 mod branches;
 mod cards;
 mod clustercard;
@@ -31,7 +32,13 @@ pub use model::{
 pub use relations::{ChangedSymbol, RelationHints, Seed};
 // Stage-③ cluster-card refinement (AI input prep, pure). IPC wiring is deferred.
 #[allow(unused_imports)]
-pub use clustercard::{build_cluster_cards, ChangedSymbolIn, ClusterCardInput};
+pub use clustercard::{
+    build_cluster_cards, build_cluster_cards_with_signals, ChangedSymbolIn, ClusterCardInput,
+    DeletedSymbolIn, RenamePairIn, SignatureChangeIn,
+};
+// Stage-② base-AST signals (deleted symbols / renames / signature changes). Pure, no AI.
+#[allow(unused_imports)]
+pub use basesignals::{DeletedSymbol, FileBaseSignals, RenamePair, SignatureChange};
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -117,6 +124,11 @@ pub struct RelationAnalysis {
     pub hints: relations::RelationHints,
     /// strong-only connected-component seeds (v2.1 ②.5).
     pub seeds: Vec<relations::Seed>,
+    /// Base-AST signals (deleted symbols / renames / signature changes) aggregated over
+    /// all changed files (planning §2.1 base/head). Computed by parsing each file's
+    /// `old_source` and diffing against the head symbols. Empty on new files / parser
+    /// errors / no before→after differences (safe degradation).
+    pub base_signals: basesignals::FileBaseSignals,
 }
 
 /// Stage-② entry point: from a repo + base/target refs, compute relation hints and
@@ -137,6 +149,8 @@ pub fn analyze_relations(
     let diff = gitdiff::diff_three_dot(repo_path, base, target)?;
 
     let mut changed: Vec<relations::ChangedSymbol> = Vec::new();
+    // Aggregate base-AST signals across all changed files (planning §2.1 base/head).
+    let mut base_signals = basesignals::FileBaseSignals::default();
 
     for file in &diff {
         let Some(lang) = symbols::Lang::from_path(&file.new_path) else {
@@ -153,6 +167,37 @@ pub fn analyze_relations(
 
         // Changed symbols aligned to Stage-1 card ids (reuses cards.rs id logic).
         let changed_refs = cards::changed_symbols_for_relations(file, &syms);
+
+        // Base-AST signals: parse `old_source` (base) and diff against the head symbols
+        // (planning §2.1). The head side of a rename / signature change must be a *changed*
+        // head symbol (so it carries a real card id); deleted symbols need no card id.
+        // Skip when there is no base (added file) or a parse failure — `file_base_signals`
+        // degrades to empty internally, but we also avoid the work on added/binary files.
+        if !file.old_source.is_empty()
+            && file.status == gitdiff::FileStatus::Modified
+            && !file.is_binary
+        {
+            let head_changed: Vec<basesignals::HeadChanged> = changed_refs
+                .iter()
+                .map(|cr| basesignals::HeadChanged {
+                    sym_idx: cr.sym_idx,
+                    card_id: cr.card_id.as_str(),
+                })
+                .collect();
+            let mut fsig = basesignals::file_base_signals(
+                lang,
+                &file.old_source,
+                &file.new_source,
+                &syms,
+                &head_changed,
+            );
+            if basesignals::has_signals(&fsig) {
+                basesignals::stamp_path(&mut fsig, &file.new_path);
+                base_signals.deleted.extend(fsig.deleted);
+                base_signals.renames.extend(fsig.renames);
+                base_signals.signature_changes.extend(fsig.signature_changes);
+            }
+        }
 
         // Imports attributed file-wide (weak import-only signal). Best-effort, cheap.
         let imports = collect_imports(lang, &file.new_source);
@@ -184,10 +229,22 @@ pub fn analyze_relations(
     let all_ids: Vec<String> = changed.iter().map(|c| c.card_id.clone()).collect();
     let seeds = relations::seed_clusters(&all_ids, &hints);
 
+    // Deterministic aggregate order (files were visited in diff order; sort defensively).
+    base_signals.deleted.sort_by(|a, b| a.id.cmp(&b.id));
+    base_signals.renames.sort_by(|a, b| {
+        a.to_card_id
+            .cmp(&b.to_card_id)
+            .then(a.from_name.cmp(&b.from_name))
+    });
+    base_signals
+        .signature_changes
+        .sort_by(|a, b| a.card_id.cmp(&b.card_id));
+
     Ok(RelationAnalysis {
         changed,
         hints,
         seeds,
+        base_signals,
     })
 }
 
@@ -244,11 +301,12 @@ pub async fn analyze_clusters(
     let review = build_review(repo_path, base, target)?;
     let analysis = analyze_relations(repo_path, base, target)?;
 
-    let cards = clustercard::build_cluster_cards(
+    let cards = clustercard::build_cluster_cards_with_signals(
         &analysis.seeds,
         &analysis.hints,
         &analysis.changed,
         &review.cards,
+        &analysis.base_signals,
     );
 
     run_cluster_pipeline(provider, &cards, &analysis.hints)

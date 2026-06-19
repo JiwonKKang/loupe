@@ -1297,3 +1297,167 @@ fn e2e_analyze_relations_unsupported_lang_is_empty() {
     assert!(a.hints.strong.is_empty() && a.hints.weak.is_empty());
     assert!(a.seeds.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// (g) base-AST signals end-to-end (planning §2.1 base/head) — real git2.
+// A surviving Go file where: `gone` is deleted, `create` gains a parameter (signature
+// change), and `oldName`→`newName` is a rename (body identical). All three signals must
+// surface through `analyze_relations.base_signals`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_analyze_relations_base_signals() {
+    use git2::{Repository, Signature};
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let sig = Signature::now("Tester", "tester@example.com").unwrap();
+
+    let path = dir.path().join("svc.go");
+    // base: gone(), create(name), oldName(x) {body}, anchor() to keep the file ≥2 symbols.
+    fs::write(
+        &path,
+        "package p\n\
+\n\
+func gone() int {\n\
+\treturn 1\n\
+}\n\
+\n\
+func create(name string) int {\n\
+\treturn len(name)\n\
+}\n\
+\n\
+func oldName(x int) int {\n\
+\ty := x + 41\n\
+\treturn y\n\
+}\n\
+\n\
+func anchor() int {\n\
+\treturn 7\n\
+}\n",
+    )
+    .unwrap();
+    let base_oid = {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("svc.go")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap()
+    };
+
+    let base_commit = repo.find_commit(base_oid).unwrap();
+    repo.branch("main", &base_commit, true).unwrap();
+    repo.branch("target", &base_commit, false).unwrap();
+    repo.set_head("refs/heads/target").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+    // head: gone removed; create gains `age int`; oldName renamed to newName (same body);
+    // anchor changed so the file has ≥2 changed symbols (per-symbol cards exist).
+    fs::write(
+        &path,
+        "package p\n\
+\n\
+func create(name string, age int) int {\n\
+\treturn len(name) + age\n\
+}\n\
+\n\
+func newName(x int) int {\n\
+\ty := x + 41\n\
+\treturn y\n\
+}\n\
+\n\
+func anchor() int {\n\
+\treturn 8\n\
+}\n",
+    )
+    .unwrap();
+    {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("svc.go")).unwrap();
+        idx.write().unwrap();
+        let tree_id = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(base_oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "base signals", &tree, &[&parent]).unwrap();
+    }
+
+    let a = super::analyze_relations(dir.path().to_str().unwrap(), "main", "target").unwrap();
+    let bs = &a.base_signals;
+
+    // deleted: `gone` (and NOT the renamed oldName).
+    let del_names: Vec<&str> = bs.deleted.iter().map(|d| d.name.as_str()).collect();
+    assert!(del_names.contains(&"gone"), "deleted: {del_names:?}");
+    assert!(!del_names.contains(&"oldName"), "rename must consume the deletion: {del_names:?}");
+
+    // rename: oldName → newName, and the `to_card_id` is a REAL changed-symbol card id.
+    assert_eq!(bs.renames.len(), 1, "renames: {:?}", bs.renames);
+    assert_eq!(bs.renames[0].from_name, "oldName");
+    assert_eq!(bs.renames[0].to_name, "newName");
+    assert!(
+        a.changed.iter().any(|c| c.card_id == bs.renames[0].to_card_id),
+        "rename to_card_id must be a real changed card: {} not in {:?}",
+        bs.renames[0].to_card_id,
+        a.changed.iter().map(|c| &c.card_id).collect::<Vec<_>>()
+    );
+
+    // signature change: create gained `age int`.
+    let sc = bs
+        .signature_changes
+        .iter()
+        .find(|s| s.name == "create")
+        .expect("create signature change");
+    assert!(sc.old_signature.contains("name string"), "old: {}", sc.old_signature);
+    assert!(sc.new_signature.contains("age int"), "new: {}", sc.new_signature);
+    assert!(
+        a.changed.iter().any(|c| c.card_id == sc.card_id),
+        "sig-change card_id must be a real changed card"
+    );
+
+    // The deleted signal must carry a synthetic, path-qualified id (not a head card id).
+    assert!(bs.deleted.iter().all(|d| d.id.starts_with("deleted::svc.go::")));
+}
+
+#[test]
+fn e2e_base_signals_determinism() {
+    // Run analyze_relations twice on the same repo state ⇒ identical base_signals.
+    use git2::{Repository, Signature};
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repository::init(dir.path()).unwrap();
+    let sig = Signature::now("Tester", "tester@example.com").unwrap();
+    let path = dir.path().join("m.go");
+    fs::write(
+        &path,
+        "package p\n\nfunc removed() int {\n\treturn 1\n}\n\nfunc keep() int {\n\treturn 2\n}\n",
+    )
+    .unwrap();
+    let base_oid = {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("m.go")).unwrap();
+        idx.write().unwrap();
+        let tid = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap()
+    };
+    let base_commit = repo.find_commit(base_oid).unwrap();
+    repo.branch("main", &base_commit, true).unwrap();
+    repo.branch("target", &base_commit, false).unwrap();
+    repo.set_head("refs/heads/target").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+    fs::write(&path, "package p\n\nfunc keep() int {\n\treturn 3\n}\n").unwrap();
+    {
+        let mut idx = repo.index().unwrap();
+        idx.add_path(std::path::Path::new("m.go")).unwrap();
+        idx.write().unwrap();
+        let tid = idx.write_tree().unwrap();
+        let tree = repo.find_tree(tid).unwrap();
+        let parent = repo.find_commit(base_oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "edit", &tree, &[&parent]).unwrap();
+    }
+    let p = dir.path().to_str().unwrap();
+    let a1 = super::analyze_relations(p, "main", "target").unwrap();
+    let a2 = super::analyze_relations(p, "main", "target").unwrap();
+    assert_eq!(a1.base_signals, a2.base_signals, "base signals must be deterministic");
+}

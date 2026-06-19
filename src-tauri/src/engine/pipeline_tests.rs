@@ -68,6 +68,8 @@ fn sym(id: &str, name: &str) -> ChangedSymbolIn {
         kind: SymbolKind::Function,
         change_type: ChangeType::Modified,
         summary: format!("Updates {name}."),
+        renamed_from: None,
+        signature_change: None,
     }
 }
 
@@ -80,6 +82,9 @@ fn card(seed_id: &str, syms: &[(&str, &str)]) -> ClusterCardInput {
         relation_hints: RelationHints::default(),
         contracts_changed: vec![],
         related_tests: vec![],
+        deleted_symbols: vec![],
+        rename_pairs: vec![],
+        signature_changes: vec![],
     }
 }
 

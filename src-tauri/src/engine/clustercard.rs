@@ -22,6 +22,7 @@
 //! Stage-1 `summary` (statistical, B1-safe), never the raw hunk. Big PRs therefore stay
 //! within token budget by construction (the diff never enters the prompt here).
 
+use super::basesignals::{FileBaseSignals, RenamePair, SignatureChange};
 use super::model::{ChangeType, ClusterKind, ReviewCard, SymbolKind};
 use super::relations::{ChangedSymbol, RelationHints, Seed};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +48,57 @@ pub struct ClusterCardInput {
     pub contracts_changed: Vec<String>,
     /// Test symbols in the seed (test→impl), by name (display).
     pub related_tests: Vec<String>,
+    /// **Base-AST signal** (planning §2.1): symbols deleted from a file that still exists
+    /// but whose other (surviving) symbols are in this seed. Informational only — these
+    /// carry synthetic ids and are **not** clustering whitelist ids; the AI is told to keep
+    /// the related surviving change aware of the deletion (prompt §base-signals).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_symbols: Vec<DeletedSymbolIn>,
+    /// **Base-AST signal**: renames `from → to` whose `to` is a member card of this seed.
+    /// Tells the AI "this symbol is the renamed old one" so a rename is one change, not a
+    /// scattered delete+add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rename_pairs: Vec<RenamePairIn>,
+    /// **Base-AST signal**: signature (header) changes of member cards of this seed,
+    /// rendered as `old → new` before→after context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signature_changes: Vec<SignatureChangeIn>,
+}
+
+/// A deleted-symbol signal as the AI sees it. Synthetic id (never a clustering whitelist id).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedSymbolIn {
+    /// Synthetic id `"deleted::<path>::<name>"` — for display/debug, NOT a whitelist id.
+    pub id: String,
+    /// The deleted symbol's bare name.
+    pub name: String,
+    /// The base signature (header) of the deleted symbol.
+    pub signature: String,
+}
+
+/// A rename signal as the AI sees it: the old name → the surviving (renamed) card.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenamePairIn {
+    /// The base (old) symbol name that disappeared.
+    pub from_name: String,
+    /// The head changed-symbol **card id** the old symbol became (a real member card id).
+    pub to_card_id: String,
+    /// The head symbol name (display).
+    pub to_name: String,
+}
+
+/// A signature-change signal as the AI sees it: a member card's `old → new` header.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureChangeIn {
+    /// The head changed-symbol **card id** (a real member card id).
+    pub card_id: String,
+    /// Bare symbol name.
+    pub name: String,
+    /// `"<old> → <new>"` rendered before→after signature.
+    pub change: String,
 }
 
 /// One changed symbol as the AI sees it. **card_id is the identity**; everything else is
@@ -64,6 +116,15 @@ pub struct ChangedSymbolIn {
     pub change_type: ChangeType,
     /// Short summary reused from the Stage-1 card (B1-safe; never the raw diff).
     pub summary: String,
+    /// **Base-AST signal**: when set, this symbol was *renamed* from this old name (its
+    /// body/signature matched a symbol deleted from the base). Inline mirror of
+    /// `ClusterCardInput::rename_pairs` so the AI sees it on the symbol itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
+    /// **Base-AST signal**: when set, this symbol's signature changed `"<old> → <new>"`.
+    /// Inline mirror of `ClusterCardInput::signature_changes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_change: Option<String>,
 }
 
 /// Build the AI input cards from the Stage-② analysis + Stage-1 cards.
@@ -85,6 +146,25 @@ pub fn build_cluster_cards(
     changed: &[ChangedSymbol],
     cards: &[ReviewCard],
 ) -> Vec<ClusterCardInput> {
+    build_cluster_cards_with_signals(seeds, hints, changed, cards, &FileBaseSignals::default())
+}
+
+/// Like [`build_cluster_cards`] but also distributes the **base-AST signals** (deleted
+/// symbols / renames / signature changes, planning §2.1) onto the seeds they belong to:
+///  - a rename / signature change is attached to the seed that owns its `to_card_id` /
+///    `card_id` member (and mirrored inline onto that `ChangedSymbolIn`);
+///  - a deleted symbol (no card id) is attached to every seed that has a member card from
+///    the *same file path* (so it never vanishes — "all changes visible", §3.1).
+///
+/// Signals naming a card id that is in no seed (defensive) are dropped from the cards but
+/// remain in the `RelationAnalysis` sidecar.
+pub fn build_cluster_cards_with_signals(
+    seeds: &[Seed],
+    hints: &RelationHints,
+    changed: &[ChangedSymbol],
+    cards: &[ReviewCard],
+    signals: &FileBaseSignals,
+) -> Vec<ClusterCardInput> {
     // card_id -> Stage-1 card (kind/change_type/summary live here).
     let card_by_id: BTreeMap<&str, &ReviewCard> =
         cards.iter().map(|c| (c.id.as_str(), c)).collect();
@@ -94,7 +174,7 @@ pub fn build_cluster_cards(
 
     seeds
         .iter()
-        .map(|seed| build_one(seed, hints, &card_by_id, &changed_by_id))
+        .map(|seed| build_one(seed, hints, &card_by_id, &changed_by_id, signals))
         .collect()
 }
 
@@ -103,13 +183,30 @@ fn build_one(
     hints: &RelationHints,
     card_by_id: &BTreeMap<&str, &ReviewCard>,
     changed_by_id: &BTreeMap<&str, &ChangedSymbol>,
+    signals: &FileBaseSignals,
 ) -> ClusterCardInput {
     let member_ids: BTreeSet<&str> = seed.card_ids.iter().map(String::as_str).collect();
+
+    // Base-AST signals whose head card id is a member of this seed (rename/sig change).
+    let rename_by_to: BTreeMap<&str, &RenamePair> = signals
+        .renames
+        .iter()
+        .filter(|r| member_ids.contains(r.to_card_id.as_str()))
+        .map(|r| (r.to_card_id.as_str(), r))
+        .collect();
+    let sigchange_by_card: BTreeMap<&str, &SignatureChange> = signals
+        .signature_changes
+        .iter()
+        .filter(|s| member_ids.contains(s.card_id.as_str()))
+        .map(|s| (s.card_id.as_str(), s))
+        .collect();
 
     let mut changed_symbols: Vec<ChangedSymbolIn> = Vec::with_capacity(seed.card_ids.len());
     let mut entrypoints: BTreeSet<String> = BTreeSet::new();
     let mut contracts: BTreeSet<String> = BTreeSet::new();
     let mut tests: BTreeSet<String> = BTreeSet::new();
+    // Paths present in this seed — used to attach deleted-symbol signals by file.
+    let mut seed_paths: BTreeSet<String> = BTreeSet::new();
 
     for id in &seed.card_ids {
         let card = card_by_id.get(id.as_str());
@@ -128,6 +225,9 @@ fn build_one(
             .map(|c| c.path.clone())
             .or_else(|| card.map(|c| c.path.clone()))
             .unwrap_or_default();
+        if !path.is_empty() {
+            seed_paths.insert(path.clone());
+        }
 
         // Entry-point heuristic: route/controller/handler path or a `main` symbol.
         if let Some(ep) = entrypoint_candidate(&path, &name) {
@@ -142,14 +242,54 @@ fn build_one(
             tests.insert(name.clone());
         }
 
+        // Inline base-AST annotations for this symbol (rename / signature change).
+        let renamed_from = rename_by_to.get(id.as_str()).map(|r| r.from_name.clone());
+        let signature_change = sigchange_by_card
+            .get(id.as_str())
+            .map(|s| format!("{} → {}", s.old_signature, s.new_signature));
+
         changed_symbols.push(ChangedSymbolIn {
             card_id: id.clone(),
             name,
             kind,
             change_type,
             summary,
+            renamed_from,
+            signature_change,
         });
     }
+
+    // Deleted symbols of any file this seed touches (no card id → attach by path).
+    let deleted_symbols: Vec<DeletedSymbolIn> = signals
+        .deleted
+        .iter()
+        .filter(|d| seed_paths.contains(&d.path))
+        .map(|d| DeletedSymbolIn {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            signature: d.signature.clone(),
+        })
+        .collect();
+
+    // Top-level mirrors (rename pairs / signature changes) for this seed, sorted stable.
+    let mut rename_pairs: Vec<RenamePairIn> = rename_by_to
+        .values()
+        .map(|r| RenamePairIn {
+            from_name: r.from_name.clone(),
+            to_card_id: r.to_card_id.clone(),
+            to_name: r.to_name.clone(),
+        })
+        .collect();
+    rename_pairs.sort_by(|a, b| a.to_card_id.cmp(&b.to_card_id));
+    let mut signature_changes: Vec<SignatureChangeIn> = sigchange_by_card
+        .values()
+        .map(|s| SignatureChangeIn {
+            card_id: s.card_id.clone(),
+            name: s.name.clone(),
+            change: format!("{} → {}", s.old_signature, s.new_signature),
+        })
+        .collect();
+    signature_changes.sort_by(|a, b| a.card_id.cmp(&b.card_id));
 
     let relation_hints = restrict_hints(hints, &member_ids);
     let algorithmic_type_hint = guess_kind(&changed_symbols, &member_ids, &relation_hints, &entrypoints);
@@ -162,6 +302,9 @@ fn build_one(
         relation_hints,
         contracts_changed: contracts.into_iter().collect(),
         related_tests: tests.into_iter().collect(),
+        deleted_symbols,
+        rename_pairs,
+        signature_changes,
     }
 }
 
