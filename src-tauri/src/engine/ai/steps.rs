@@ -20,9 +20,14 @@
 //!   invariant (title/summary never empty) is guaranteed by `verify::verify_labels`, and
 //!   the M4 token check flags identifiers the AI may have invented.
 //!
-//! Every AI call uses **Haiku (Fast) + temperature=0** (setup-token returns HTTP 429 on
-//! Sonnet, and temp=0 gives classification/ordering 재현성). On a verification failure a
-//! step **retries once**; a second failure is `Err` so the orchestrator can fall back.
+//! Every AI call uses **Sonnet (Quality) via the `claude` CLI (`ai::cli::CliProvider`) +
+//! temperature=0**. The *direct* Messages API returns HTTP 429 on Sonnet (only Haiku is
+//! reachable that way), but the `claude` CLI routes through the Claude Code backend and
+//! reaches Sonnet on the same setup-token — so the pipeline runs on Sonnet for分류·정렬·요약
+//! 품질·결정성, with temp=0 reinforcing 재현성. On a verification failure a step **retries
+//! once**; a second failure is `Err` so the orchestrator can fall back. (The provider is
+//! injected — these functions only set `ModelTier::Quality`; the orchestrator wires the
+//! concrete `CliProvider`.)
 
 use super::prompts::{
     cluster_and_order_output_schema, cluster_output_schema, label_output_schema,
@@ -152,10 +157,10 @@ pub fn is_small_pr(cards: &[ClusterCardInput]) -> bool {
 ///
 /// Builds the whitelist from the input cards' card ids, sends one structured request, and
 /// verifies the result. On verification failure, retries once; a second failure is `Err`.
-/// The provider call uses the **Fast** tier (Haiku): setup-token이 Sonnet에 HTTP 429
-/// (rate_limit)를 반환해 Sonnet을 못 쓰므로 Haiku 사용; 분류 재현성은 temperature=0으로
-/// 확보한다 (구조화 출력/분류는 temp=0이 정석). Empty input ⇒ an empty result (no network
-/// call).
+/// The provider call uses the **Quality** tier (Sonnet) through `CliProvider`: 직접 API는
+/// Sonnet에 HTTP 429를 반환하지만 claude CLI 경유로 Sonnet 호출이 가능하므로, 분류는 Sonnet
+/// 품질·결정성으로 수행하고 재현성은 temperature=0으로 보강한다. Empty input ⇒ an empty result
+/// (no network call).
 pub async fn cluster_step(
     provider: &dyn LlmProvider,
     cards: &[ClusterCardInput],
@@ -175,8 +180,9 @@ pub async fn cluster_step(
     let mut last_err: Option<LlmError> = None;
     for _attempt in 0..2 {
         let req = CompletionRequest {
-            // setup-token이 Sonnet 429라 Haiku(Fast) 사용; 분류 재현성은 temperature=0으로 확보.
-            tier: ModelTier::Fast,
+            // Sonnet(Quality) via CliProvider: 직접 API는 Sonnet 429라 claude CLI 경유로
+            // Sonnet 사용(분류 품질·결정성). 재현성은 temperature=0으로 보강.
+            tier: ModelTier::Quality,
             system: CLUSTER_SYSTEM.to_string(),
             user: user.clone(),
             max_tokens: CLUSTER_MAX_TOKENS,
@@ -235,8 +241,8 @@ fn build_user_message(cards: &[ClusterCardInput]) -> String {
 /// a *permutation* of the clustering members — the AI may not drop, add, or move ids
 /// between clusters. Retries once on a verification failure; a second failure is `Err`.
 ///
-/// Fast (Haiku) tier + temperature=0 (재현성). An empty / single-id clustering needs no
-/// model call — the order is already determined, so it short-circuits.
+/// Quality (Sonnet) tier via `CliProvider` + temperature=0 (재현성). An empty / single-id
+/// clustering needs no model call — the order is already determined, so it short-circuits.
 pub async fn order_step(
     provider: &dyn LlmProvider,
     clusters: &ClusterResult,
@@ -259,7 +265,8 @@ pub async fn order_step(
     let mut last_err: Option<LlmError> = None;
     for _attempt in 0..2 {
         let req = CompletionRequest {
-            tier: ModelTier::Fast,
+            // Quality(Sonnet) via CliProvider — 정렬도 Sonnet 품질·결정성.
+            tier: ModelTier::Quality,
             system: ORDER_SYSTEM.to_string(),
             user: user.clone(),
             max_tokens: ORDER_MAX_TOKENS,
@@ -353,8 +360,8 @@ fn build_order_message(clusters: &ClusterResult, hints: &RelationHints) -> Strin
 // Small-PR branch — clustering + ordering in one call (planning §4.1)
 // ===========================================================================
 
-/// **Small-PR path (planning §4.1):** cluster AND order in a single Haiku call to cut
-/// latency. Used when [`is_small_pr`] is true. Returns the same `(ClusterResult,
+/// **Small-PR path (planning §4.1):** cluster AND order in a single Sonnet call (via
+/// `CliProvider`) to cut latency. Used when [`is_small_pr`] is true. Returns the same `(ClusterResult,
 /// OrderResult)` pair the two-call path produces, so the orchestrator is branch-agnostic.
 ///
 /// The combined output is verified in two passes against the same card-id whitelist:
@@ -386,7 +393,8 @@ pub async fn cluster_and_order_combined(
     let mut last_err: Option<LlmError> = None;
     for _attempt in 0..2 {
         let req = CompletionRequest {
-            tier: ModelTier::Fast,
+            // Quality(Sonnet) via CliProvider — 소형 PR 결합 호출도 Sonnet.
+            tier: ModelTier::Quality,
             system: CLUSTER_AND_ORDER_SYSTEM.to_string(),
             user: user.clone(),
             max_tokens: COMBINED_MAX_TOKENS,
@@ -468,8 +476,8 @@ pub struct LabelOutcome {
 ///  - **M4**: code-identifier tokens in the text not present in the input are reported in
 ///    `LabelOutcome::suspicious` (a re-request hook; not fatal).
 ///
-/// Fast (Haiku) tier + temperature=0 (요약은 0~0.3 가능하나 일단 0 통일). Retries once on a
-/// parse failure. Empty input ⇒ empty labels, no call.
+/// Quality (Sonnet) tier via `CliProvider` + temperature=0 (요약은 0~0.3 가능하나 일단 0
+/// 통일). Retries once on a parse failure. Empty input ⇒ empty labels, no call.
 pub async fn label_step(
     provider: &dyn LlmProvider,
     clusters: &[LabelInput],
@@ -493,7 +501,8 @@ pub async fn label_step(
     let mut last_err: Option<LlmError> = None;
     for _attempt in 0..2 {
         let req = CompletionRequest {
-            tier: ModelTier::Fast,
+            // Quality(Sonnet) via CliProvider — 요약도 Sonnet 품질.
+            tier: ModelTier::Quality,
             system: LABEL_SYSTEM.to_string(),
             user: user.clone(),
             max_tokens: LABEL_MAX_TOKENS,

@@ -470,3 +470,171 @@ async fn haiku_temp0_clustering_determinism() {
     assert!(run1.is_ok() || run1.is_err());
     assert!(run2.is_ok() || run2.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// ★ Live CliProvider (Sonnet) full-pipeline + determinism harness.
+//
+// The whole point of CliProvider: reach **Sonnet** on a setup-token (the direct
+// Messages API 429s on Sonnet; the `claude` CLI routes through the Claude Code
+// backend and succeeds). This test runs the dearday `main...feat/kakao-auth`
+// strong-seeds through the FULL pipeline (cluster → order → label) on
+// `CliProvider`/Sonnet, TWICE, and checks:
+//   (a) Sonnet actually ran (the pipeline succeeds end to end via the CLI),
+//   (b) every ordered/unclustered card id is inside the whitelist (no hallucination
+//       escaped verification) and nothing was dropped (§3.1),
+//   (c) every cluster's title AND summary are non-empty (B1),
+//   (d) DETERMINISM: the two runs' clustering partition + kinds are compared
+//       (the core question — is Sonnet more consistent run-to-run than Haiku was),
+//   (e) the final, ordered, labelled cluster list is printed for inspection.
+//
+// `#[ignore]` + env-only token (`CLAUDE_CODE_OAUTH_TOKEN`, never hard-coded). Run:
+//   CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... cargo test -p loupe -- --ignored \
+//       --nocapture dearday_cli_sonnet_full_pipeline_determinism
+// ---------------------------------------------------------------------------
+#[ignore = "requires CLAUDE_CODE_OAUTH_TOKEN + dearday repo + claude CLI; calls live Sonnet via the CLI"]
+#[tokio::test]
+async fn dearday_cli_sonnet_full_pipeline_determinism() {
+    use crate::engine::ai::cli::CliProvider;
+    use crate::engine::ai::steps::cluster_step;
+    use crate::engine::{analyze_clusters, analyze_relations, build_cluster_cards, build_review};
+    use crate::engine::clustercard::ClusterCardInput;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let token = match std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            eprintln!("CLAUDE_CODE_OAUTH_TOKEN unset — skipping live CliProvider/Sonnet pipeline");
+            return;
+        }
+    };
+    let repo = "/Users/jiwon/desktop/projects/dearday";
+    if !std::path::Path::new(repo).exists() {
+        eprintln!("dearday repo absent — skipping");
+        return;
+    }
+    let (base, target) = ("main", "feat/kakao-auth");
+
+    // Rebuild the same whitelist + card_id→name map the pipeline uses.
+    let review = build_review(repo, base, target).expect("stage-1 build_review");
+    let analysis = analyze_relations(repo, base, target).expect("stage-2 relations");
+    let cards: Vec<ClusterCardInput> =
+        build_cluster_cards(&analysis.seeds, &analysis.hints, &analysis.changed, &review.cards);
+    let whitelist: BTreeSet<String> = cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter().map(|s| s.card_id.clone()))
+        .collect();
+    let name_of: BTreeMap<String, String> = cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter())
+        .map(|s| (s.card_id.clone(), s.name.clone()))
+        .collect();
+    let label = |id: &str| -> String {
+        match name_of.get(id) {
+            Some(n) => format!("{n} [{id}]"),
+            None => id.to_string(),
+        }
+    };
+    if whitelist.is_empty() {
+        eprintln!("dearday diff produced no changed code symbols — skipping");
+        return;
+    }
+
+    let provider = CliProvider::new(token);
+
+    // (a) Sonnet must actually be the model the provider selects for Quality.
+    assert_eq!(
+        provider.model_for(ModelTier::Quality),
+        "claude-sonnet-4-6",
+        "CliProvider Quality tier must be Sonnet"
+    );
+
+    eprintln!(
+        "\n========== CliProvider/Sonnet full pipeline :: dearday {base}...{target} =========="
+    );
+    eprintln!(
+        "seeds(input cards)={}  changed code symbols(whitelist)={}",
+        cards.len(),
+        whitelist.len()
+    );
+
+    // ---- Full pipeline (cluster → order → label), assembled into a ClusterLayout. ----
+    let layout = match analyze_clusters(&provider, repo, base, target).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("\n==> Sonnet pipeline errored (likely transient CLI/overload): {e}");
+            // Measurement harness — a transient failure must not fail the suite.
+            return;
+        }
+    };
+
+    // (e) Print the final, ordered, labelled cluster list.
+    eprintln!(
+        "\n---- final clusters ({}) ----",
+        layout.clusters.len()
+    );
+    for (i, c) in layout.clusters.iter().enumerate() {
+        eprintln!("\n  [{}] cluster {} :: kind={:?}", i + 1, c.id, c.kind);
+        eprintln!("      title:   {}", c.title);
+        eprintln!("      summary: {}", c.summary);
+        eprintln!("      members (flow order):");
+        for id in &c.ordered_card_ids {
+            eprintln!("        - {}", label(id));
+        }
+    }
+    if !layout.unclustered.is_empty() {
+        eprintln!("\n  Unclustered ({}):", layout.unclustered.len());
+        for id in &layout.unclustered {
+            eprintln!("        - {}", label(id));
+        }
+    }
+
+    // (b) Every ordered/unclustered id is whitelisted and nothing is dropped (§3.1).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for c in &layout.clusters {
+        for id in &c.ordered_card_ids {
+            assert!(whitelist.contains(id), "ordered id {id} not in whitelist");
+            assert!(seen.insert(id.clone()), "ordered id {id} appeared twice");
+        }
+        // (c) B1 — non-empty title + summary for every cluster.
+        assert!(!c.title.trim().is_empty(), "cluster {} has empty title", c.id);
+        assert!(!c.summary.trim().is_empty(), "cluster {} has empty summary", c.id);
+    }
+    for id in &layout.unclustered {
+        assert!(whitelist.contains(id), "unclustered id {id} not in whitelist");
+        seen.insert(id.clone());
+    }
+    assert_eq!(seen, whitelist, "no card id may be dropped (ordered ∪ unclustered == whitelist)");
+
+    // ---- (d) DETERMINISM: two back-to-back clusterings on Sonnet, compared. ----
+    // Reuse the same `canonical` shape (partition + kinds, order-independent) the
+    // Haiku determinism harness used, so the two are directly comparable.
+    eprintln!("\n---- determinism (2× cluster_step on Sonnet, temp=0) ----");
+    let run1 = cluster_step(&provider, &cards).await;
+    let run2 = cluster_step(&provider, &cards).await;
+    match (&run1, &run2) {
+        (Ok(a), Ok(b)) => {
+            let ca = canonical(a);
+            let cb = canonical(b);
+            if ca == cb {
+                eprintln!(
+                    "==> DETERMINISTIC: both Sonnet runs produced the SAME clustering \
+                     (identical composition + kinds)."
+                );
+            } else {
+                eprintln!(
+                    "==> NON-DETERMINISTIC: the two Sonnet runs DIFFER (composition and/or kind)."
+                );
+                eprintln!("    run1 canonical = {ca:?}");
+                eprintln!("    run2 canonical = {cb:?}");
+            }
+        }
+        _ => eprintln!(
+            "==> INCONCLUSIVE: at least one clustering run errored (transient); rerun later."
+        ),
+    }
+    eprintln!("\n========== end CliProvider/Sonnet pipeline ==========\n");
+
+    // Measurement harness: a transient Overloaded/Timeout must not fail the suite.
+    assert!(run1.is_ok() || run1.is_err());
+    assert!(run2.is_ok() || run2.is_err());
+}

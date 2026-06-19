@@ -19,6 +19,7 @@
 //! `anthropic.rs`).
 
 pub mod anthropic;
+pub mod cli;
 pub mod prompts;
 pub mod steps;
 pub mod verify;

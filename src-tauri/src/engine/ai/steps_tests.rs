@@ -115,7 +115,7 @@ async fn cluster_step_parses_and_verifies_valid_output() {
 }
 
 #[tokio::test]
-async fn cluster_step_sends_seed_correction_prompt_and_schema_on_fast_tier_temp0() {
+async fn cluster_step_sends_seed_correction_prompt_and_schema_on_quality_tier_temp0() {
     let cards = vec![card("seed-1", &[("a", "create")])];
     let provider = SeqProvider::one(json!({
         "clusters": [{ "clusterId": "c1", "memberCardIds": ["a"], "kind": "flow" }],
@@ -125,8 +125,8 @@ async fn cluster_step_sends_seed_correction_prompt_and_schema_on_fast_tier_temp0
     let req = provider.last.lock().unwrap().clone().unwrap();
     assert_eq!(
         req.tier,
-        ModelTier::Fast,
-        "clustering uses the Fast (Haiku) tier: setup-token이 Sonnet 429라 Haiku 사용"
+        ModelTier::Quality,
+        "clustering uses the Quality (Sonnet) tier via CliProvider: 직접 API는 Sonnet 429라 claude CLI 경유"
     );
     assert_eq!(
         req.temperature, 0.0,
@@ -309,7 +309,7 @@ async fn order_step_orders_within_cluster_on_fast_tier_temp0() {
         vec!["c".to_string(), "a".to_string(), "b".to_string()]
     );
     let req = provider.last.lock().unwrap().clone().unwrap();
-    assert_eq!(req.tier, ModelTier::Fast, "ordering uses Haiku (Fast)");
+    assert_eq!(req.tier, ModelTier::Quality, "ordering uses Sonnet (Quality) via CliProvider");
     assert_eq!(req.temperature, 0.0, "ordering at temp=0 for 재현성");
     assert_eq!(req.system, crate::engine::ai::prompts::ORDER_SYSTEM);
     assert!(req.user.contains("\"clusters\""));
@@ -478,7 +478,7 @@ async fn label_step_batches_all_clusters_in_one_call() {
     assert_eq!(out.labels.clusters.len(), 2);
     assert_eq!(provider.call_count(), 1, "ALL clusters in ONE batched call (§8.4)");
     let req = provider.last.lock().unwrap().clone().unwrap();
-    assert_eq!(req.tier, ModelTier::Fast);
+    assert_eq!(req.tier, ModelTier::Quality, "labelling uses Sonnet (Quality) via CliProvider");
     assert_eq!(req.temperature, 0.0);
     assert_eq!(req.system, crate::engine::ai::prompts::LABEL_SYSTEM);
     assert!(req.user.contains("\"clusters\""));
