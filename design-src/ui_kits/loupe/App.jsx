@@ -2,7 +2,7 @@
 
 function App() {
   const cards = window.LoupeData.cards;
-  const [screen, setScreen] = React.useState('review'); // onboarding | review | summary
+  const [screen, setScreen] = React.useState('review'); // onboarding | loading | review | summary
   const [index, setIndex] = React.useState(2);
   const [treeOpen, setTreeOpen] = React.useState(false);
   const [dir, setDir] = React.useState(1);
@@ -18,6 +18,17 @@ function App() {
   const tid = React.useRef(2);
 
   const card = cards[index];
+
+  // Clusters for the analysis screen: real chapters + a stray "Unclustered".
+  // Each gets its own review duration so they finish at different times (parallel).
+  const analyzeClusters = React.useMemo(() => {
+    const order = []; const by = {};
+    cards.forEach((c) => { if (!by[c.chapter]) { by[c.chapter] = []; order.push(c.chapter); } by[c.chapter].push(c.symbol); });
+    const durs = { 'Request intake': 1500, 'Authentication': 2550, 'Logging': 1950 };
+    const out = order.map((ch) => ({ chapter: ch, cards: by[ch], dur: durs[ch] || 1700 }));
+    out.push({ chapter: 'Unclustered', cards: ['health.Ping'], dur: 1150 });
+    return out;
+  }, [cards]);
 
   // Derived spine items. A card with unresolved threads IS the "flag".
   const threadCount = (cid) => threads.filter((t) => t.cardId === cid).length;
@@ -93,17 +104,8 @@ function App() {
 
   return (
     <React.Fragment>
-      {screen === 'onboarding' && <Onboarding onFinish={() => {
-        setScreen('loading');
-        setTimeout(() => setScreen('review'), 3400);
-      }} />}
-      {screen === 'loading' && <LoupeLoader full stages={[
-        'Reading the diff…',
-        'Tracing data flow…',
-        'Clustering related changes…',
-        'Grouping into chapters…',
-        'Building the review queue…',
-      ]} />}
+      {screen === 'onboarding' && <Onboarding onFinish={() => setScreen('loading')} />}
+      {screen === 'loading' && <AnalyzeScreen clusters={analyzeClusters} onDone={() => setScreen('review')} />}
       {screen === 'review' && (
         <FileTree tree={window.LoupeData.tree} activeId={card.id} open={treeOpen}
           onToggle={() => setTreeOpen((v) => !v)}

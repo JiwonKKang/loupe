@@ -43,7 +43,7 @@ async fn dearday_cache_hit_is_instant() {
 
     // 1st pass — real Sonnet via the CLI (~5분).
     let t0 = Instant::now();
-    let first = analyze_clusters_cached(&provider, &cache, &repo, &base, &target)
+    let first = analyze_clusters_cached(&provider, &cache, &repo, &base, &target, &())
         .await
         .expect("first dearday analysis");
     let first_secs = t0.elapsed().as_secs_f64();
@@ -55,7 +55,7 @@ async fn dearday_cache_hit_is_instant() {
 
     // 2nd pass — full-layout cache hit, must be near-instant and identical.
     let t1 = Instant::now();
-    let second = analyze_clusters_cached(&provider, &cache, &repo, &base, &target)
+    let second = analyze_clusters_cached(&provider, &cache, &repo, &base, &target, &())
         .await
         .expect("second dearday analysis");
     let second_secs = t1.elapsed().as_secs_f64();
@@ -146,7 +146,7 @@ async fn all_unclustered_repro() {
         // PATH A reproduces the OLD per-seed product behaviour (single-seed AI input). The
         // pre-fix code restricted hints to the seed's members; the full hints here are a
         // superset and don't change the single-seed fragmentation this path demonstrates.
-        match run_cluster_pipeline(&provider, one, &analysis.hints).await {
+        match run_cluster_pipeline(&provider, one, &analysis.hints, &()).await {
             Ok(frag) => {
                 eprintln!(
                     "[DEBUG-cl9x]   seed[{i}] {} -> clusters={} unclustered={} (members={:?})",
@@ -193,7 +193,7 @@ async fn all_unclustered_repro() {
     eprintln!("\n[DEBUG-cl9x] ===== PATH C: analyze_clusters_cached (product path) =====");
     let cache_dir = tempfile::tempdir().unwrap();
     let cache = Cache::open_in_dir(cache_dir.path()).unwrap();
-    match analyze_clusters_cached(&provider, &cache, &repo, &base, &target).await {
+    match analyze_clusters_cached(&provider, &cache, &repo, &base, &target, &()).await {
         Ok(layout) => {
             eprintln!(
                 "[DEBUG-cl9x] PATH C: clusters={} unclustered={} ordered={}",
@@ -324,7 +324,7 @@ async fn caddy_unclustered_breakdown() {
     let provider = CliProvider::new(token);
 
     eprintln!("\n[DEBUG-caddy] ===== run_cluster_pipeline (ALL cards at once) =====");
-    match run_cluster_pipeline(&provider, &cards_in, &analysis.hints).await {
+    match run_cluster_pipeline(&provider, &cards_in, &analysis.hints, &()).await {
         Ok(layout) => {
             let clustered: BTreeSet<&str> = layout
                 .clusters

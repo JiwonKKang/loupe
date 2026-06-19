@@ -529,6 +529,61 @@ pub async fn label_step(
     Err(last_err.unwrap_or_else(|| LlmError::Parse("label_step: no attempt ran".into())))
 }
 
+/// Label **one** cluster (Stage-⑥, per-cluster streaming variant). Same system prompt /
+/// schema / `verify_labels` guarantees as the batched [`label_step`], but scoped to a single
+/// cluster so the pipeline can label clusters **concurrently** and reveal each in the loader
+/// the moment its review finishes (the queue rail fills one cluster at a time).
+///
+/// Never fails: on a provider or parse error after one retry it returns the B1 fallback label
+/// so a single flaky cluster can't sink the whole pipeline. Returns the verified (non-empty)
+/// label plus this cluster's M4-suspicious tokens (empty when the text is clean).
+pub async fn label_one(
+    provider: &dyn LlmProvider,
+    cluster: &LabelInput,
+    allowed_names: &BTreeSet<String>,
+) -> (ClusterLabel, Vec<String>) {
+    let id = cluster.cluster_id.clone();
+    let only = std::slice::from_ref(cluster);
+    let cluster_ids: BTreeSet<String> = std::iter::once(id.clone()).collect();
+    let user = build_label_message(only);
+    let schema = label_output_schema();
+
+    for _attempt in 0..2 {
+        let req = CompletionRequest {
+            tier: ModelTier::Quality,
+            system: LABEL_SYSTEM.to_string(),
+            user: user.clone(),
+            max_tokens: LABEL_MAX_TOKENS,
+            json_schema: Some(schema.clone()),
+            temperature: 0.0,
+        };
+        if let Ok(resp) = provider.complete(req).await {
+            if let Ok(parsed) = serde_json::from_value::<LabelResult>(resp.json.clone()) {
+                let (labels, suspicious) =
+                    super::verify::verify_labels(parsed, &cluster_ids, allowed_names);
+                let labels = backfill_missing_labels(labels, only);
+                if let Some(found) = labels.clusters.into_iter().find(|l| l.cluster_id == id) {
+                    let bad = suspicious.get(&id).cloned().unwrap_or_default();
+                    return (found, bad);
+                }
+            }
+        }
+    }
+
+    // Both attempts failed — synthesize the B1 fallback (same string as the batched backfill).
+    let empty = LabelResult {
+        clusters: Vec::new(),
+        merge_suggestions: Vec::new(),
+        split_suggestions: Vec::new(),
+    };
+    let label = backfill_missing_labels(empty, only)
+        .clusters
+        .into_iter()
+        .next()
+        .expect("backfill adds the one missing cluster");
+    (label, Vec::new())
+}
+
 /// One cluster as the labelling call sees it: the cluster id, the algorithmic kind hint,
 /// and its changed symbols (name + kind + change + short summary). No diff body.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]

@@ -1,6 +1,17 @@
 mod engine;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Re-emits engine pipeline milestones over the `analyze://progress` Tauri event so the
+/// front-end `AnalyzeScreen` can mirror the real stages live. Holds a clone of the app handle;
+/// `emit` is best-effort (a dropped event only affects the loader, never the result).
+struct TauriProgress(AppHandle);
+
+impl engine::ProgressSink for TauriProgress {
+    fn emit(&self, event: engine::Progress) {
+        let _ = self.0.emit("analyze://progress", event);
+    }
+}
 
 /// Build the review payload for `base...target` in the repo at `repo_path`.
 /// The front-end calls this via `invoke('load_review', { repoPath, base, target })`.
@@ -50,7 +61,10 @@ async fn analyze_review(
     // never logged. The trait object is what the engine consumes.
     let provider = engine::ai::cli::CliProvider::new(token);
 
-    engine::analyze_review(&provider, &cache_dir, &repo_path, &base, &target)
+    // Stream pipeline milestones to the loader over `analyze://progress`.
+    let progress = TauriProgress(app.clone());
+
+    engine::analyze_review(&provider, &cache_dir, &repo_path, &base, &target, &progress)
         .await
         .map_err(|e| e.to_string())
 }

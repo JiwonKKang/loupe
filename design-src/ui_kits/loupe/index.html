@@ -49,6 +49,13 @@
     from { opacity: 0; transform: translateY(5px); }
     to   { opacity: 1; transform: translateY(0); }
   }
+  @keyframes loupe-row-in {
+    from { opacity: 0; transform: translateY(7px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes loupe-spin {
+    to { transform: rotate(360deg); }
+  }
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
     border: 2px solid transparent; background-clip: padding-box; }
@@ -63,6 +70,7 @@
 <div id="root"></div>
 <script type="text/babel" src="data.jsx"></script>
 <script type="text/babel" src="LoupeLoader.jsx"></script>
+<script type="text/babel" src="AnalyzeScreen.jsx"></script>
 <script type="text/babel" src="FileTree.jsx"></script>
 <script type="text/babel" src="Onboarding.jsx"></script>
 <script type="text/babel" src="ReviewScreen.jsx"></script>
@@ -70,7 +78,7 @@
 <script type="text/babel" src="App.jsx"></script>
 <script type="text/babel" data-presets="react">
   const mount = () => {
-    if (!window.App || !window.LoupeData || !window.LoupeLoader || !window.FileTree || !window.LoupeDesignSystem_045e3b) {
+    if (!window.App || !window.LoupeData || !window.LoupeLoader || !window.AnalyzeScreen || !window.FileTree || !window.LoupeDesignSystem_045e3b) {
       return setTimeout(mount, 30);
     }
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);

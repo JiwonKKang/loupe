@@ -8,10 +8,11 @@
 
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import Onboarding from './screens/Onboarding';
 import ReviewScreen from './screens/ReviewScreen';
 import SummaryScreen from './screens/SummaryScreen';
-import { LoupeLoader } from './components/LoupeLoader';
+import { AnalyzeScreen } from './components/AnalyzeScreen';
 import { FileTree } from './components/FileTree';
 import { buildTree } from './data/fixtures';
 // Note: syntax color is a front-end concern — ReviewScreen imports highlightGo
@@ -19,6 +20,11 @@ import { buildTree } from './data/fixtures';
 
 // The Unclustered bucket id (engine §3.1) and its display label/kind.
 const UNCLUSTERED = '__unclustered';
+
+// Live analysis-progress state for the AnalyzeScreen loader, reduced from the engine's
+// `analyze://progress` events. `reviewed` maps a cluster id → its real AI title once its
+// per-cluster review lands (the rail flips from provisional/spinner to title + check).
+const INITIAL_PROGRESS = { phase: 'static', files: 0, clusters: [], reviewed: {} };
 
 /**
  * Flatten the flat `cards` into the cluster flow order (`orderedCardIds`), trailing the
@@ -55,6 +61,8 @@ export default function App() {
   const [orderedCardIds, setOrderedCardIds] = React.useState([]);
   const [unclustered, setUnclustered] = React.useState([]);
   const [analysisState, setAnalysisState] = React.useState('idle');
+  // Live loader progress (AnalyzeScreen), driven by `analyze://progress` events.
+  const [progress, setProgress] = React.useState(INITIAL_PROGRESS);
 
   const [index, setIndex] = React.useState(0);
   const [dir, setDir] = React.useState(1);
@@ -81,6 +89,7 @@ export default function App() {
     // Reset the cluster overlay for the new range.
     setClusters([]); setClusterOrder([]); setOrderedCardIds([]); setUnclustered([]);
     setAnalysisState('clustering');
+    setProgress(INITIAL_PROGRESS); // fresh loader for this range
     const seq = ++analyzeSeq.current;
 
     // analyze_review needs the model token. It returns cards + clusters in one shot.
@@ -110,6 +119,28 @@ export default function App() {
   }, []);
 
   React.useEffect(() => { load(range); }, [range, load]);
+
+  // Subscribe once to the engine's pipeline progress events and reduce them into `progress`
+  // for the AnalyzeScreen loader. Events are cosmetic — a missed one only affects the loader,
+  // never the result (which arrives via the analyze_review promise).
+  React.useEffect(() => {
+    let alive = true;
+    let unlisten = null;
+    listen('analyze://progress', (ev) => {
+      const p = ev && ev.payload;
+      if (!p || !p.kind) return;
+      setProgress((prev) => {
+        switch (p.kind) {
+          case 'static': return { ...prev, phase: 'static', files: p.files != null ? p.files : prev.files };
+          case 'clusters': return { ...prev, phase: 'review', clusters: p.clusters || [] };
+          case 'reviewed': return { ...prev, reviewed: { ...prev.reviewed, [p.id]: p.chapter || '' } };
+          case 'final': return { ...prev, phase: 'final' };
+          default: return prev;
+        }
+      });
+    }).then((un) => { if (alive) unlisten = un; else un(); });
+    return () => { alive = false; if (unlisten) unlisten(); };
+  }, []);
 
   const startReview = (r) => {
     setRange({ repoPath: r.repoPath, base: r.base || 'main', target: r.target, token: r.token });
@@ -284,7 +315,7 @@ export default function App() {
   if (cards === null) {
     return (
       <React.Fragment>
-        <LoadingScreen />
+        <AnalyzeScreen progress={progress} />
         <ScreenSwitcher screen={screen} setScreen={setScreen} />
       </React.Fragment>
     );
@@ -338,24 +369,6 @@ function CenterPane({ children }) {
       {children}
     </div>
   );
-}
-
-// The dataflow-clustering stage sequence shown on the full-screen loader while
-// analyze_review runs (cards + clusters arrive together at the end). The labels
-// cycle on a timer and hold on the last one; a cache miss can take minutes, so
-// the staged sequence keeps the wait legible.
-const LOADING_STAGES = [
-  'Reading the diff…',
-  'Tracing data flow…',
-  'Clustering related changes…',
-  'Grouping into chapters…',
-  'Building the review queue…',
-];
-
-function LoadingScreen() {
-  // The loading mark (steady dot + breathing halo) with the staged dataflow
-  // labels. Holds until analyze_review returns the cards + cluster overlay.
-  return <LoupeLoader full stages={LOADING_STAGES} />;
 }
 
 function EmptyDiffScreen({ range, onBack }) {

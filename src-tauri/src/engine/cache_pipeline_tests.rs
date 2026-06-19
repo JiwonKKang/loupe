@@ -193,7 +193,7 @@ async fn run(
     merge_base: &str,
     cards: &[ClusterCardInput],
 ) -> ClusterLayout {
-    super::run_cluster_pipeline_cached(provider, cache, "/repo", merge_base, cards, &RelationHints::default())
+    super::run_cluster_pipeline_cached(provider, cache, "/repo", merge_base, cards, &RelationHints::default(), &())
         .await
         .expect("cached pipeline succeeds")
 }
@@ -391,7 +391,7 @@ async fn analyze_clusters_cached_e2e_second_open_is_zero_calls() {
     let provider = CountingProvider::new();
 
     // 1st analysis: AI runs.
-    let first = super::analyze_clusters_cached(&provider, &cache, repo_path, "main", "target")
+    let first = super::analyze_clusters_cached(&provider, &cache, repo_path, "main", "target", &())
         .await
         .expect("first analysis");
     let after_first = provider.calls();
@@ -399,7 +399,7 @@ async fn analyze_clusters_cached_e2e_second_open_is_zero_calls() {
     assert!(!first.ordered_card_ids.is_empty(), "produced a layout");
 
     // 2nd analysis: full-layout hit ⇒ ZERO AI calls + byte-identical.
-    let second = super::analyze_clusters_cached(&provider, &cache, repo_path, "main", "target")
+    let second = super::analyze_clusters_cached(&provider, &cache, repo_path, "main", "target", &())
         .await
         .expect("second analysis");
     assert_eq!(provider.calls(), after_first, "second open ⇒ AI 0 calls (full layout hit)");

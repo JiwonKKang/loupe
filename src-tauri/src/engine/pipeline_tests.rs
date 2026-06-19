@@ -17,19 +17,34 @@ use super::relations::RelationHints;
 use super::run_cluster_pipeline;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// A mock provider returning a sequence of canned JSON replies (one per call) and
-/// counting calls.
+/// A mock provider that returns canned JSON replies and counts calls.
+///
+/// Clustering / ordering / combined calls are served from a FIFO `replies` queue (one per
+/// call, in order). **Labelling is content-addressed**: Stage-⑥ now labels each cluster on its
+/// own call (`label_one`), bounded-concurrent, so the queue order can't map a reply to the
+/// right cluster. Instead, a label call is detected by its system prompt and answered from the
+/// `labels` map keyed by the cluster id in the request — concurrency-safe and deterministic.
 struct SeqProvider {
     replies: Mutex<std::collections::VecDeque<Value>>,
+    labels: HashMap<String, (String, String)>,
     calls: Mutex<usize>,
 }
 
 impl SeqProvider {
     fn new(replies: Vec<Value>) -> Self {
+        Self::with_labels(replies, &[])
+    }
+    /// `labels`: `(clusterId, title, summary)` triples answered for per-cluster label calls.
+    fn with_labels(replies: Vec<Value>, labels: &[(&str, &str, &str)]) -> Self {
         Self {
             replies: Mutex::new(replies.into_iter().collect()),
+            labels: labels
+                .iter()
+                .map(|(id, t, s)| (id.to_string(), (t.to_string(), s.to_string())))
+                .collect(),
             calls: Mutex::new(0),
         }
     }
@@ -38,16 +53,41 @@ impl SeqProvider {
     }
 }
 
+/// The first cluster id in a (single-cluster) label request body.
+fn first_cluster_id(user: &str) -> String {
+    serde_json::from_str::<Value>(user)
+        .ok()
+        .and_then(|v| v.get("clusters").and_then(|c| c.get(0)).cloned())
+        .and_then(|c| c.get("clusterId").and_then(|s| s.as_str()).map(String::from))
+        .unwrap_or_default()
+}
+
 #[async_trait]
 impl LlmProvider for SeqProvider {
-    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         *self.calls.lock().unwrap() += 1;
-        let json = self
-            .replies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(Value::Null);
+        // The labelling system prompt is the only one asking for title/summary (mirrors the
+        // discriminator the cache mock uses).
+        let is_label = req.system.contains("title") && req.system.contains("summary");
+        let json = if is_label {
+            let id = first_cluster_id(&req.user);
+            let (title, summary) = self
+                .labels
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| ("변경".to_string(), "요약".to_string()));
+            json!({
+                "clusters": [ { "clusterId": id, "title": title, "summary": summary } ],
+                "mergeSuggestions": [],
+                "splitSuggestions": []
+            })
+        } else {
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Value::Null)
+        };
         Ok(CompletionResponse {
             json,
             stop_reason: "end_turn".into(),
@@ -92,26 +132,24 @@ fn card(seed_id: &str, syms: &[(&str, &str)]) -> ClusterCardInput {
 async fn small_pr_takes_combined_branch_then_labels() {
     // 3 symbols ≤ SMALL_PR_SYMBOLS ⇒ combined cluster+order (1 call) + label (1 call).
     let cards = vec![card("seed-1", &[("a", "create"), ("b", "validate"), ("c", "save")])];
-    let provider = SeqProvider::new(vec![
-        // combined: clusters (ordered members) + clusterOrder, one object.
-        json!({
-            "clusters": [ { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" } ],
-            "unclustered": [],
-            "clusterOrder": ["k1"]
-        }),
-        // labels.
-        json!({
-            "clusters": [ { "clusterId": "k1", "title": "생성 흐름", "summary": "Creates, validates, saves." } ],
-            "mergeSuggestions": [],
-            "splitSuggestions": []
-        }),
-    ]);
+    let provider = SeqProvider::with_labels(
+        vec![
+            // combined: clusters (ordered members) + clusterOrder, one object.
+            json!({
+                "clusters": [ { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" } ],
+                "unclustered": [],
+                "clusterOrder": ["k1"]
+            }),
+        ],
+        // per-cluster labels (Stage-⑥ now calls once per cluster).
+        &[("k1", "생성 흐름", "Creates, validates, saves.")],
+    );
 
-    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default())
+    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
         .await
         .expect("pipeline succeeds");
 
-    assert_eq!(provider.call_count(), 2, "small PR ⇒ combined(1) + label(1) = 2 calls");
+    assert_eq!(provider.call_count(), 2, "small PR ⇒ combined(1) + 1 cluster label(1) = 2 calls");
     assert_eq!(layout.clusters.len(), 1);
     let c = &layout.clusters[0];
     assert_eq!(c.id, "k1");
@@ -134,40 +172,42 @@ async fn big_pr_runs_three_calls_and_orders_across_clusters() {
         ("j", "logout"), ("k", "config"), ("l", "router"), ("m", "test_login"),
     ];
     let cards = vec![card("seed-1", &names)];
-    let provider = SeqProvider::new(vec![
-        // clustering: two clusters.
-        json!({
-            "clusters": [
-                { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" },
-                { "clusterId": "k2", "memberCardIds": ["g", "h"], "kind": "domain-concept" }
-            ],
-            "unclustered": ["k", "l", "m", "d", "e", "f", "i", "j"]
-        }),
-        // ordering: reorder members + put k2 (domain) before k1 (flow) is allowed; here
-        // we keep flow first. orderedByCluster must be a permutation of each cluster.
-        json!({
-            "clusterOrder": ["k1", "k2"],
-            "orderedByCluster": [
-                { "clusterId": "k1", "cardIds": ["a", "b", "c"] },
-                { "clusterId": "k2", "cardIds": ["h", "g"] }
-            ]
-        }),
-        // labels.
-        json!({
-            "clusters": [
-                { "clusterId": "k1", "title": "로그인 흐름", "summary": "Handles login." },
-                { "clusterId": "k2", "title": "JWT 발급", "summary": "Issues JWT." }
-            ],
-            "mergeSuggestions": [],
-            "splitSuggestions": []
-        }),
-    ]);
+    let provider = SeqProvider::with_labels(
+        vec![
+            // clustering: two clusters.
+            json!({
+                "clusters": [
+                    { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" },
+                    { "clusterId": "k2", "memberCardIds": ["g", "h"], "kind": "domain-concept" }
+                ],
+                "unclustered": ["k", "l", "m", "d", "e", "f", "i", "j"]
+            }),
+            // ordering: reorder members + put k2 (domain) before k1 (flow) is allowed; here
+            // we keep flow first. orderedByCluster must be a permutation of each cluster.
+            json!({
+                "clusterOrder": ["k1", "k2"],
+                "orderedByCluster": [
+                    { "clusterId": "k1", "cardIds": ["a", "b", "c"] },
+                    { "clusterId": "k2", "cardIds": ["h", "g"] }
+                ]
+            }),
+        ],
+        // per-cluster labels (one call each).
+        &[
+            ("k1", "로그인 흐름", "Handles login."),
+            ("k2", "JWT 발급", "Issues JWT."),
+        ],
+    );
 
-    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default())
+    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
         .await
         .expect("pipeline succeeds");
 
-    assert_eq!(provider.call_count(), 3, "big PR ⇒ cluster + order + label = 3 calls");
+    assert_eq!(
+        provider.call_count(),
+        4,
+        "big PR ⇒ cluster(1) + order(1) + per-cluster label(2) = 4 calls"
+    );
     assert_eq!(layout.cluster_order, vec!["k1".to_string(), "k2".to_string()]);
     // k2's members came back reordered as h,g.
     let k2 = layout.clusters.iter().find(|c| c.id == "k2").unwrap();
@@ -228,26 +268,22 @@ async fn file_seeds_are_clustered_into_an_infra_topic_not_unclustered() {
     let ci_id = format!("{ci}::__file");
     let cargo_id = format!("{cargo}::__file");
     let caddy_id = format!("{caddy}::__file");
-    let provider = SeqProvider::new(vec![
-        json!({
+    let provider = SeqProvider::with_labels(
+        vec![json!({
             "clusters": [
                 { "clusterId": "k1", "memberCardIds": ["a"], "kind": "flow" },
                 { "clusterId": "k2", "memberCardIds": [ci_id, cargo_id, caddy_id], "kind": "infra" }
             ],
             "unclustered": [],
             "clusterOrder": ["k1", "k2"]
-        }),
-        json!({
-            "clusters": [
-                { "clusterId": "k1", "title": "메트릭 초기화", "summary": "메트릭 수집을 초기화한다." },
-                { "clusterId": "k2", "title": "HTTPS 인프라 구성", "summary": "Caddy 리버스 프록시로 HTTPS를 적용한다." }
-            ],
-            "mergeSuggestions": [],
-            "splitSuggestions": []
-        }),
-    ]);
+        })],
+        &[
+            ("k1", "메트릭 초기화", "메트릭 수집을 초기화한다."),
+            ("k2", "HTTPS 인프라 구성", "Caddy 리버스 프록시로 HTTPS를 적용한다."),
+        ],
+    );
 
-    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default())
+    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
         .await
         .expect("pipeline succeeds");
 
@@ -265,7 +301,7 @@ async fn file_seeds_are_clustered_into_an_infra_topic_not_unclustered() {
 #[tokio::test]
 async fn empty_cards_produce_empty_layout_without_calls() {
     let provider = SeqProvider::new(vec![]);
-    let layout = run_cluster_pipeline(&provider, &[], &RelationHints::default())
+    let layout = run_cluster_pipeline(&provider, &[], &RelationHints::default(), &())
         .await
         .expect("empty pipeline");
     assert!(layout.clusters.is_empty());

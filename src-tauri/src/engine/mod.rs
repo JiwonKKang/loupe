@@ -14,6 +14,7 @@ mod cards;
 mod clustercard;
 mod gitdiff;
 mod model;
+mod progress;
 mod relations;
 mod symbols;
 
@@ -45,6 +46,9 @@ pub use basesignals::{DeletedSymbol, FileBaseSignals, RenamePair, SignatureChang
 pub use cache::{card_hash, Cache, SCHEMA_VER};
 #[allow(unused_imports)]
 pub use gitdiff::DiffShas;
+// Streaming progress for the live AnalyzeScreen (cosmetic side-channel; lib.rs supplies a
+// Tauri-emitting sink, tests pass the no-op `()`).
+pub use progress::{Progress, ProgressCluster, ProgressSink};
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -312,7 +316,8 @@ pub async fn analyze_clusters(
 
     let cards = build_all_cluster_cards(&review, &analysis);
 
-    run_cluster_pipeline(provider, &cards, &analysis.hints)
+    // Non-streaming entry (no IPC sink): discard progress events.
+    run_cluster_pipeline(provider, &cards, &analysis.hints, &())
         .await
         .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))
 }
@@ -369,20 +374,37 @@ pub async fn analyze_review(
     repo_path: &str,
     base: &str,
     target: &str,
+    progress: &dyn ProgressSink,
 ) -> Result<ReviewData, EngineError> {
     // Stage-1: the diff-render cards (the card-id source of truth / whitelist).
     let mut review = build_review(repo_path, base, target)?;
 
+    // Static prep is done (the cards exist) — tell the loader how many files changed.
+    progress.emit(Progress::Static {
+        files: distinct_file_count(&review),
+    });
+
     // ⑦-cached AI cluster pipeline. The cache db lives under `<app_data_dir>/loupe`.
     let cache = cache::Cache::open_in_dir(cache_dir)
         .map_err(|e| EngineError::Parse(format!("cache open failed: {e}")))?;
-    let layout = analyze_clusters_cached(provider, &cache, repo_path, base, target).await?;
+    let layout = analyze_clusters_cached(provider, &cache, repo_path, base, target, progress).await?;
 
     // The 3-dot SHAs are the determinism markers the front-end shows / keys on.
     let shas = gitdiff::resolve_shas(repo_path, base, target)?;
 
     fold_layout(&mut review, layout, shas);
     Ok(review)
+}
+
+/// Distinct changed-file count, for the loader's "Scanning the diff · N files" line. Counts
+/// unique card paths (a file with several changed symbols counts once).
+fn distinct_file_count(review: &ReviewData) -> usize {
+    review
+        .cards
+        .iter()
+        .map(|c| c.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// Fold a [`ClusterLayout`] onto a Stage-1 [`ReviewData`]: copy the cluster two-tier across,
@@ -432,11 +454,13 @@ pub async fn analyze_clusters_cached(
     repo_path: &str,
     base: &str,
     target: &str,
+    progress: &dyn ProgressSink,
 ) -> Result<ClusterLayout, EngineError> {
     // M3: the cache key base is the *merge-base* SHA (the actual 3-dot base), not base tip.
     let shas = gitdiff::resolve_shas(repo_path, base, target)?;
 
-    // (2) Full-layout hit — same head ⇒ same order, AI 0 calls (§8.1 / §8.4).
+    // (2) Full-layout hit — same head ⇒ same order, AI 0 calls (§8.1 / §8.4). No per-cluster
+    // events fire (there is no AI work to stream); the loader transitions straight to done.
     if let Some(layout) = cache.get_layout(repo_path, &shas.merge_base_sha, &shas.head_sha) {
         return Ok(layout);
     }
@@ -453,6 +477,7 @@ pub async fn analyze_clusters_cached(
         &shas.merge_base_sha,
         &cards,
         &analysis.hints,
+        progress,
     )
     .await
     .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))?;
@@ -484,6 +509,7 @@ async fn run_cluster_pipeline_cached(
     merge_base_sha: &str,
     cards: &[clustercard::ClusterCardInput],
     hints: &relations::RelationHints,
+    progress: &dyn ProgressSink,
 ) -> Result<ClusterLayout, ai::LlmError> {
     // Whole-input grain: one cache row for the entire clustering input. The key is the set
     // hash of every card's content hash (order-independent), reusing the `cluster_result`
@@ -494,8 +520,9 @@ async fn run_cluster_pipeline_cached(
     }
 
     // Miss: run the full pipeline over ALL cards at once (the global clustering decision),
-    // converging on the same code path `analyze_clusters` uses.
-    let layout = run_cluster_pipeline(provider, cards, hints).await?;
+    // converging on the same code path `analyze_clusters` uses. This is the path that streams
+    // per-cluster review events to the loader.
+    let layout = run_cluster_pipeline(provider, cards, hints, progress).await?;
 
     let _ = cache.put_cluster(repo_path, merge_base_sha, &set_hash, &layout);
     Ok(layout)
@@ -532,26 +559,123 @@ pub async fn run_cluster_pipeline(
     provider: &dyn ai::LlmProvider,
     cards: &[clustercard::ClusterCardInput],
     hints: &relations::RelationHints,
+    progress: &dyn ProgressSink,
 ) -> Result<ClusterLayout, ai::LlmError> {
     use ai::steps;
+    use futures_util::stream::{self, StreamExt};
 
     let whitelist = steps::whitelist_of(cards);
 
-    // ④+⑤: small PR ⇒ one combined call; big PR ⇒ cluster then order (planning §4.1).
+    // ④+⑤: small PR ⇒ one combined call; big PR ⇒ cluster then order (planning §4.1). As soon
+    // as membership is known we tell the loader which clusters it will review (spinning) so the
+    // queue rail can appear before the per-cluster reviews come back.
     let (clustering, ordering) = if steps::is_small_pr(cards) {
-        steps::cluster_and_order_combined(provider, cards).await?
+        let pair = steps::cluster_and_order_combined(provider, cards).await?;
+        progress.emit(Progress::Clusters {
+            clusters: progress_clusters(&pair.0, cards),
+        });
+        pair
     } else {
         let clustering = steps::cluster_step(provider, cards).await?;
+        progress.emit(Progress::Clusters {
+            clusters: progress_clusters(&clustering, cards),
+        });
         let ordering = steps::order_step(provider, &clustering, hints, &whitelist).await?;
         (clustering, ordering)
     };
 
-    // ⑥: batched title/summary over the ordered clusters.
+    // ⑥: review each cluster on its own AI call, bounded-concurrent, revealing each in the
+    // loader the moment it finishes (`Reviewed`). Completion order is cosmetic — the final
+    // layout is assembled from `clustering`/`ordering`, not from this order — so streaming the
+    // labels per-cluster changes nothing about the result, only how the wait is shown.
     let label_inputs = build_label_inputs(&clustering, cards);
     let allowed_names = allowed_symbol_names(cards);
-    let label_outcome = steps::label_step(provider, &label_inputs, &allowed_names).await?;
+    let allowed_ref = &allowed_names;
 
+    let mut labels: Vec<ai::steps::ClusterLabel> = Vec::with_capacity(label_inputs.len());
+    let mut suspicious: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    // Build the per-cluster review futures eagerly (each borrows `provider`/`allowed_ref`), then
+    // drive up to LABEL_CONCURRENCY at once. (Collecting the futures avoids a higher-ranked
+    // lifetime error that a `.map(|inp| async move {…})` closure trips over.)
+    let review_futs: Vec<_> = label_inputs
+        .iter()
+        .map(|inp| steps::label_one(provider, inp, allowed_ref))
+        .collect();
+    let mut reviews = stream::iter(review_futs).buffer_unordered(LABEL_CONCURRENCY);
+    while let Some((label, bad)) = reviews.next().await {
+        progress.emit(Progress::Reviewed {
+            id: label.cluster_id.clone(),
+            chapter: label.title.clone(),
+        });
+        if !bad.is_empty() {
+            suspicious.insert(label.cluster_id.clone(), bad);
+        }
+        labels.push(label);
+    }
+
+    let label_outcome = ai::steps::LabelOutcome {
+        labels: ai::steps::LabelResult {
+            clusters: labels,
+            merge_suggestions: Vec::new(),
+            split_suggestions: Vec::new(),
+        },
+        suspicious,
+    };
+
+    // All clusters reviewed → the final ordering/assembly pass.
+    progress.emit(Progress::Final);
     Ok(assemble_layout(clustering, ordering, label_outcome, cards))
+}
+
+/// Max clusters reviewed concurrently in Stage-⑥. Each review is its own `claude` CLI call,
+/// so this bounds how many subprocesses run at once (the rail fills in waves rather than all
+/// at once on a large PR). Small enough to be gentle on the machine / rate limits.
+const LABEL_CONCURRENCY: usize = 4;
+
+/// Build the loader's provisional cluster list from the clustering result: each cluster's id,
+/// a readable provisional chapter label (the real AI title arrives later per `Reviewed`), and
+/// its member symbol display names.
+fn progress_clusters(
+    clustering: &ai::steps::ClusterResult,
+    cards: &[clustercard::ClusterCardInput],
+) -> Vec<ProgressCluster> {
+    use std::collections::BTreeMap;
+    let by_id: BTreeMap<&str, &clustercard::ChangedSymbolIn> = cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter())
+        .map(|s| (s.card_id.as_str(), s))
+        .collect();
+    clustering
+        .clusters
+        .iter()
+        .map(|c| ProgressCluster {
+            id: c.cluster_id.clone(),
+            chapter: provisional_chapter(&c.cluster_id),
+            cards: c
+                .member_card_ids
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()))
+                .map(|s| s.name.clone())
+                .collect(),
+        })
+        .collect()
+}
+
+/// Turn a cluster id slug (`auth-flow`, `error_type`) into a readable provisional chapter
+/// (`Auth Flow`, `Error Type`) shown until the AI title replaces it.
+fn provisional_chapter(id: &str) -> String {
+    id.replace(['-', '_'], " ")
+        .split_whitespace()
+        .map(|w| {
+            let mut ch = w.chars();
+            match ch.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Build the labelling inputs (Stage-⑥) from the clustering result + the cluster cards:
