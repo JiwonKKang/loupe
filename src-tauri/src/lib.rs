@@ -46,8 +46,20 @@ async fn analyze_review(
     target: String,
     token: String,
 ) -> Result<engine::ReviewData, String> {
-    if token.trim().is_empty() {
+    let token = token.trim().to_string();
+    if token.is_empty() {
         return Err("missing model token — finish onboarding first".to_string());
+    }
+    // A `claude setup-token` is a single ASCII string with no spaces (sk-ant-oat01-…). A value
+    // with whitespace or non-ASCII characters is a paste error (e.g. a card summary landed in
+    // the token field). Catch it here with an actionable message — otherwise the bad value
+    // reaches `CLAUDE_CODE_OAUTH_TOKEN` and surfaces as a cryptic CLI "invalid header value".
+    if token.chars().any(|c| c.is_whitespace() || !c.is_ascii()) {
+        return Err(
+            "model token looks invalid (it contains spaces or non-ASCII characters). Re-run \
+             `claude setup-token` and paste the sk-ant-… value into onboarding."
+                .to_string(),
+        );
     }
 
     // <app_data_dir>/loupe (created on demand by the cache layer).
