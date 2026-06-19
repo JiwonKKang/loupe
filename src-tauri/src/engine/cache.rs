@@ -43,7 +43,7 @@ use std::sync::Mutex;
 /// Bump this when a prompt (`ai::prompts`) or an output schema changes so every cached row
 /// (card hashes + layouts) becomes unreachable and the next analysis re-runs the AI. Mixed
 /// into both the `card_hash` and the table keys.
-pub const SCHEMA_VER: i64 = 1;
+pub const SCHEMA_VER: i64 = 2;
 
 /// The SQLite-backed analysis cache (M2: a `Mutex<Connection>`). Construct with
 /// [`Cache::open`] (a real file under a cache dir) or [`Cache::open_in_dir`] (tests pass a

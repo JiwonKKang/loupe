@@ -398,3 +398,86 @@ fn build_cluster_cards_without_signals_is_unchanged() {
     assert!(out[0].changed_symbols[0].renamed_from.is_none());
     assert!(out[0].changed_symbols[0].signature_change.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// File-level seeds (Infra/Config topic clustering — planning §4.3/§4.4)
+// ---------------------------------------------------------------------------
+
+/// Build a file-level (symbol-less) Stage-1 card with id `<path>::__file`.
+fn file_card(path: &str, ct: ChangeType) -> ReviewCard {
+    ReviewCard {
+        id: format!("{path}::__file"),
+        chapter: "f".into(),
+        symbol: path.into(),
+        path: path.into(),
+        status: "pending".into(),
+        summary: format!("Updates {path}."),
+        lines: vec![ReviewLine { n: 1, t: T_ADD, c: "x".into() }],
+        cluster_id: None,
+        kind: SymbolKind::File,
+        qualified: path.into(),
+        change_type: ct,
+        ai_summary: None,
+    }
+}
+
+#[test]
+fn file_seeds_enter_whitelist_with_path_as_name() {
+    // Two infra files → two singleton file seeds; the card_id is the file card id
+    // (so it joins the AI whitelist) and the name is the PATH (the AI groups on it).
+    let cards = vec![
+        file_card(".github/workflows/ci.yml", ChangeType::Added),
+        file_card("Cargo.toml", ChangeType::Modified),
+    ];
+    let out = build_file_seed_cards(&cards, &BTreeSet::new());
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].cluster_id, "file-seed-1");
+    assert_eq!(out[0].changed_symbols.len(), 1);
+    assert_eq!(out[0].changed_symbols[0].card_id, ".github/workflows/ci.yml::__file");
+    assert_eq!(out[0].changed_symbols[0].name, ".github/workflows/ci.yml");
+    // Config/CI/cargo files are Infra-hinted; kind is Config.
+    assert_eq!(out[0].algorithmic_type_hint, ClusterKind::Infra);
+    assert_eq!(out[0].changed_symbols[0].kind, SymbolKind::Config);
+}
+
+#[test]
+fn migration_file_seed_is_contract_kind() {
+    let cards = vec![file_card("db/migrations/0007_add_tls.sql", ChangeType::Added)];
+    let out = build_file_seed_cards(&cards, &BTreeSet::new());
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].algorithmic_type_hint, ClusterKind::Contract);
+    assert_eq!(out[0].changed_symbols[0].kind, SymbolKind::Migration);
+}
+
+#[test]
+fn already_seeded_and_symbol_cards_are_excluded() {
+    // A symbol card (not File kind) is never a file seed; a file card already covered by a
+    // symbol seed (its id in `already_seeded`) is skipped so it is not double-fed.
+    let cards = vec![
+        card("a", "foo", "f.go", SymbolKind::Function, ChangeType::Modified),
+        file_card("README.md", ChangeType::Modified),
+        file_card("Dockerfile", ChangeType::Modified),
+    ];
+    let mut already = BTreeSet::new();
+    already.insert("Dockerfile::__file".to_string());
+    let out = build_file_seed_cards(&cards, &already);
+    // Only README.md remains (symbol card skipped by kind; Dockerfile skipped by already_seeded).
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].changed_symbols[0].card_id, "README.md::__file");
+    // A plain doc file is File kind (still Infra-hinted as a non-flow change).
+    assert_eq!(out[0].changed_symbols[0].kind, SymbolKind::File);
+    assert_eq!(out[0].algorithmic_type_hint, ClusterKind::Infra);
+}
+
+#[test]
+fn file_seed_ids_are_stable_and_sequential() {
+    // Determinism: file seeds follow input order with file-seed-<n> ids.
+    let cards = vec![
+        file_card("Caddyfile", ChangeType::Added),
+        file_card("Cargo.lock", ChangeType::Modified),
+        file_card("deploy.sh", ChangeType::Added),
+    ];
+    let out = build_file_seed_cards(&cards, &BTreeSet::new());
+    let ids: Vec<&str> = out.iter().map(|c| c.cluster_id.as_str()).collect();
+    assert_eq!(ids, vec!["file-seed-1", "file-seed-2", "file-seed-3"]);
+}

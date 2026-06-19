@@ -428,6 +428,119 @@ fn is_contract_name(name: &str) -> bool {
         || n.ends_with("event")
 }
 
+// ===========================================================================
+// File-level seeds (planning §4.3 Infra/Config + §4.4 경로/주제 기반)
+// ===========================================================================
+//
+// Symbol-less changes (CI/CD, Cargo.*, Caddyfile, *.yaml/*.toml, Dockerfile,
+// .gitignore, docs, generated files …) become Stage-1 *file-level* cards
+// (`SymbolKind::File`, id `<path>::__file`). They carry no symbol relations, so
+// `analyze_relations` never sees them and they never enter a strong-relation seed.
+// Left out of the AI input entirely they all fall to "Unclustered" — read by the
+// reviewer as *classification failure* when they are really just infra/config.
+//
+// `build_file_seed_cards` turns each such card into its **own singleton seed-card**
+// so it DOES enter the clustering whitelist. The AI is told (prompts.rs) to group
+// these by tool/purpose (CI, dependencies, caddy, …); truly unrelated ones still
+// fall to Unclustered, but the common infra-PR case now forms real Infra clusters.
+
+/// Build one synthetic singleton seed-card per **file-level** Stage-1 card that is
+/// NOT already a member of a symbol seed. Each card carries a single `ChangedSymbolIn`
+/// whose `card_id` is the file card's id (so it joins the whitelist) and whose `name`
+/// is the file path (the AI groups on path/topic). The kind is guessed from the path
+/// (`SymbolKind::Config`/`Migration`/`File`) and the algorithmic hint is `Infra`/`Contract`.
+///
+/// Deterministic: the input `cards` are already in stable Stage-1 order; we keep it and
+/// assign `file-seed-<n>` ids by appearance. `already_seeded` excludes ids that the
+/// symbol seeds (Stage-②) already cover, so a card is never double-fed.
+pub fn build_file_seed_cards(
+    cards: &[ReviewCard],
+    already_seeded: &BTreeSet<String>,
+) -> Vec<ClusterCardInput> {
+    let mut out: Vec<ClusterCardInput> = Vec::new();
+    for card in cards {
+        // Only symbol-less *file-level* cards are candidates (symbol cards are already
+        // in the whitelist via their seed). Skip anything a symbol seed already covers.
+        if card.kind != SymbolKind::File || already_seeded.contains(card.id.as_str()) {
+            continue;
+        }
+        let kind = file_symbol_kind(&card.path);
+        let hint = file_type_hint(kind, &card.path);
+        let n = out.len() + 1;
+        out.push(ClusterCardInput {
+            cluster_id: format!("file-seed-{n}"),
+            algorithmic_type_hint: hint,
+            entrypoint_candidates: Vec::new(),
+            changed_symbols: vec![ChangedSymbolIn {
+                card_id: card.id.clone(),
+                // The PATH is the grouping key the AI sees (topic/tool lives in the path).
+                name: card.path.clone(),
+                kind,
+                change_type: card.change_type,
+                // Stat summary stays out of the labelling input (see steps.rs); here we
+                // keep the short Stage-1 summary so the clustering call has minimal context.
+                summary: card.summary.clone(),
+                renamed_from: None,
+                signature_change: None,
+            }],
+            relation_hints: RelationHints::default(),
+            contracts_changed: Vec::new(),
+            related_tests: Vec::new(),
+            deleted_symbols: Vec::new(),
+            rename_pairs: Vec::new(),
+            signature_changes: Vec::new(),
+        });
+    }
+    out
+}
+
+/// Classify a symbol-less file by path into a [`SymbolKind`] for the file seed:
+///  - DB migrations / SQL / sqlx metadata → `Migration` (contract-shaped),
+///  - build / CI / config / infra files (toml, yaml, json, Dockerfile, Caddyfile,
+///    .github/, .sh, .gitignore, lockfiles …) → `Config`,
+///  - everything else (docs, generated text, assets) → `File`.
+fn file_symbol_kind(path: &str) -> SymbolKind {
+    let p = path.to_ascii_lowercase();
+    let base = p.rsplit('/').next().unwrap_or(&p);
+    if p.contains("migration") || p.ends_with(".sql") || p.contains("/.sqlx/") {
+        return SymbolKind::Migration;
+    }
+    let is_config = base == "dockerfile"
+        || base == "caddyfile"
+        || base == ".gitignore"
+        || base == ".dockerignore"
+        || base == "makefile"
+        || base.starts_with("cargo.")
+        || p.starts_with(".github/")
+        || p.contains("/.github/")
+        || p.ends_with(".toml")
+        || p.ends_with(".yaml")
+        || p.ends_with(".yml")
+        || p.ends_with(".json")
+        || p.ends_with(".sh")
+        || p.ends_with(".caddy")
+        || p.ends_with(".env")
+        || p.ends_with(".conf")
+        || p.ends_with(".ini")
+        || p.ends_with(".lock");
+    if is_config {
+        SymbolKind::Config
+    } else {
+        SymbolKind::File
+    }
+}
+
+/// Algorithmic cluster-kind hint for a file seed: a migration/SQL file is a `Contract`
+/// change; any other config/infra/doc file is `Infra`. The AI may override (it decides
+/// the final topic grouping), but this seeds the kind so a single-file infra change is
+/// not mis-hinted as `Flow`.
+fn file_type_hint(kind: SymbolKind, _path: &str) -> ClusterKind {
+    match kind {
+        SymbolKind::Migration => ClusterKind::Contract,
+        _ => ClusterKind::Infra,
+    }
+}
+
 #[cfg(test)]
 #[path = "clustercard_tests.rs"]
 mod tests;

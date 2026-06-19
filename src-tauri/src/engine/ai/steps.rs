@@ -540,13 +540,17 @@ pub struct LabelInput {
 }
 
 /// A changed symbol shown to the labelling call (display context only).
+///
+/// Deliberately carries **no statistical `summary`** ("Updates X: +A −B lines"): that
+/// belongs on the card, not the cluster. Feeding it here made the model copy symbol names
+/// and line counts into the cluster `summary` (Issue A — cluster summary leaked per-card
+/// detail). The label call gets only name/kind/change so the summary stays an INTENT.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabelSymbolIn {
     pub name: String,
     pub kind: crate::engine::model::SymbolKind,
     pub change_type: crate::engine::model::ChangeType,
-    pub summary: String,
 }
 
 /// Build the labelling user-message JSON: all clusters with their changed symbols.

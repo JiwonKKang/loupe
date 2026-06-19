@@ -145,10 +145,14 @@ export default function App() {
       const cl = clusterById.get(c.clusterId);
       return { id: cl.id, title: cl.title, kind: cl.kind, summary: cl.summary };
     }
-    // Only call a card "Unclustered" once a real overlay exists (engine §3.1); a bare
+    // Only bucket a card as "기타" once a real overlay exists (engine §3.1); a bare
     // fallback with no clusters keeps the file view rather than labelling everything.
+    // Note: infra/config files now get real `infra` clusters (engine file-seeds), so this
+    // residual bucket holds only genuinely-unrelated changes — phrased as "기타 변경"
+    // (other changes), NOT a classification *failure*.
     if (unclusteredSet.has(c.id) || (hasOverlay && (analysisState === 'done' || analysisState === 'fallback'))) {
-      return { id: UNCLUSTERED, title: 'Unclustered changes', kind: 'unclustered', summary: '' };
+      return { id: UNCLUSTERED, title: '기타 변경', kind: 'unclustered',
+        summary: '특정 흐름·주제에 묶이지 않는 개별 변경입니다.' };
     }
     return null; // no overlay → no band (defensive).
   }, [clusterById, unclusteredSet, analysisState, hasOverlay]);

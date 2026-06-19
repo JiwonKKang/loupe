@@ -34,8 +34,8 @@ pub use relations::{ChangedSymbol, RelationHints, Seed};
 // Stage-③ cluster-card refinement (AI input prep, pure). IPC wiring is deferred.
 #[allow(unused_imports)]
 pub use clustercard::{
-    build_cluster_cards, build_cluster_cards_with_signals, ChangedSymbolIn, ClusterCardInput,
-    DeletedSymbolIn, RenamePairIn, SignatureChangeIn,
+    build_cluster_cards, build_cluster_cards_with_signals, build_file_seed_cards, ChangedSymbolIn,
+    ClusterCardInput, DeletedSymbolIn, RenamePairIn, SignatureChangeIn,
 };
 // Stage-② base-AST signals (deleted symbols / renames / signature changes). Pure, no AI.
 #[allow(unused_imports)]
@@ -310,17 +310,42 @@ pub async fn analyze_clusters(
     let review = build_review(repo_path, base, target)?;
     let analysis = analyze_relations(repo_path, base, target)?;
 
-    let cards = clustercard::build_cluster_cards_with_signals(
+    let cards = build_all_cluster_cards(&review, &analysis);
+
+    run_cluster_pipeline(provider, &cards, &analysis.hints)
+        .await
+        .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))
+}
+
+/// Build the **complete** AI clustering input: the symbol seed-cards (Stage-③, from the
+/// strong-relation seeds) PLUS one synthetic singleton seed-card per **file-level** card
+/// not already covered by a symbol seed (planning §4.3/§4.4 — Infra/Config topic
+/// clustering). Without the file seeds, every symbol-less change (CI/CD, Cargo.*, Caddy,
+/// yaml/toml, Dockerfile …) is outside the whitelist and the front-end renders it as a
+/// "Unclustered" *failure* band; folding them in lets the AI group them by tool/topic.
+///
+/// `already_seeded` = every card id any symbol seed covers, so a card is never double-fed.
+/// Deterministic: symbol cards keep their Stage-② order; file seeds follow in stable
+/// Stage-1 card order. Pure — no IO.
+fn build_all_cluster_cards(
+    review: &ReviewData,
+    analysis: &RelationAnalysis,
+) -> Vec<clustercard::ClusterCardInput> {
+    use std::collections::BTreeSet;
+    let mut cards = clustercard::build_cluster_cards_with_signals(
         &analysis.seeds,
         &analysis.hints,
         &analysis.changed,
         &review.cards,
         &analysis.base_signals,
     );
-
-    run_cluster_pipeline(provider, &cards, &analysis.hints)
-        .await
-        .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))
+    // Every card id any symbol seed already covers (so file seeds don't duplicate them).
+    let already_seeded: BTreeSet<String> = cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter().map(|s| s.card_id.clone()))
+        .collect();
+    cards.extend(clustercard::build_file_seed_cards(&review.cards, &already_seeded));
+    cards
 }
 
 /// ⑧ IPC entry point: the full Stage-1 + Stage-2 payload for the front-end.
@@ -419,13 +444,7 @@ pub async fn analyze_clusters_cached(
     // (3) Miss: prepare the seed cards (the per-seed 부분 무효화 unit).
     let review = build_review(repo_path, base, target)?;
     let analysis = analyze_relations(repo_path, base, target)?;
-    let cards = clustercard::build_cluster_cards_with_signals(
-        &analysis.seeds,
-        &analysis.hints,
-        &analysis.changed,
-        &review.cards,
-        &analysis.base_signals,
-    );
+    let cards = build_all_cluster_cards(&review, &analysis);
 
     let layout = run_cluster_pipeline_cached(
         provider,
@@ -564,7 +583,8 @@ fn build_label_inputs(
                     name: s.name.clone(),
                     kind: s.kind,
                     change_type: s.change_type,
-                    summary: s.summary.clone(),
+                    // No statistical `summary` here: per-card detail (line counts) must not
+                    // leak into the cluster summary (Issue A — cluster=intent, card=stats).
                 })
                 .collect(),
         })

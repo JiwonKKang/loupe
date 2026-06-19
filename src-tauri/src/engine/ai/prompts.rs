@@ -56,6 +56,18 @@ class).
 one flow).
   - infra             : configuration / build / DI / feature-flag / environment change.
 
+INFRA / CONFIG FILES (no code symbols — name is a file PATH, kind=config/migration/file): \
+group them by TOOL and PURPOSE into `infra` clusters (or `contract` for a \
+migration/schema), do NOT leave them in `unclustered` just because they have no call graph. \
+Put files that serve the SAME tool or goal together, e.g.:
+  - `.github/workflows/*.yml`, CI/deploy scripts → one CI/CD cluster.
+  - `Cargo.toml` + `Cargo.lock` (or package.json + lockfile) → one dependency cluster.
+  - `Caddyfile` / `*.caddy` / reverse-proxy + TLS config → one caddy/proxy cluster.
+  - `Dockerfile` / `docker-compose*` / `.dockerignore` → one container cluster.
+  - migrations / `*.sql` / `.sqlx/*` → one DB/schema cluster (kind=contract).
+A file that shares NO tool or purpose with any other change is the only thing that may go \
+to `unclustered`. Prefer a small, well-named infra cluster over Unclustered.
+
 Hard rules:
   - Use ONLY the card ids present in the input. Never invent a symbol or a card id.
   - Do not assume side effects that are not in the cards.
@@ -130,6 +142,13 @@ change — cluster it with the callers/types it affects.
 Classify each cluster's `kind` as exactly one of: flow, contract, domain-concept, \
 shared-foundation, infra.
 
+INFRA / CONFIG FILES (no code symbols — the name is a file PATH): group them by TOOL and \
+PURPOSE into `infra` clusters (or `contract` for a migration/schema) instead of leaving \
+them `unclustered`. Same tool/goal together — `.github/workflows`=CI, Cargo.toml+Cargo.lock=\
+dependencies, Caddyfile/*.caddy=caddy/proxy, Dockerfile/docker-compose=container, \
+migrations/*.sql/.sqlx=DB schema. Only a file sharing no tool/purpose with anything else \
+may go to `unclustered`.
+
 PART B — ORDER, in the SAME response:
   - `memberCardIds` inside each cluster must be in top-down execution flow (caller before \
 callee; a signature type before the function using it; a caller's several changed callees \
@@ -158,28 +177,38 @@ Output only the structured JSON the schema defines.";
 /// safety net behind the "don't assert" rule.
 pub const LABEL_SYSTEM: &str = "\
 You name and summarize each cluster of a code review. You are given `clusters`, each with \
-its `clusterId`, an algorithmic `kind`, and its `changedSymbols` (name + kind + change + a \
-short summary). For EVERY cluster return:
+its `clusterId`, an algorithmic `kind`, and its `changedSymbols` (name + kind + change). \
+For EVERY cluster return:
 
   - `title`: the change in the form [target] + [change action], short (e.g. \"주문 생성 시 \
 쿠폰 할인 적용\", \"결제 실패 이벤트 재시도 정책 변경\"). Never empty.
-  - `summary`: 1 to 3 sentences describing what the change does. Never empty.
+  - `summary`: 1 to 2 sentences stating the cluster's ONE overall INTENT — what behaviour \
+or capability this group of changes achieves, as a reviewer would describe its purpose. \
+Never empty.
+
+The summary is the cluster's INTENT, not an inventory of its parts. Per-symbol details \
+(which functions changed, how many lines, +N/−M counts) are shown ELSEWHERE on each card — \
+do NOT repeat them here.
 
 LANGUAGE (한국어 확정): Write `title` and `summary` in KOREAN (자연어 설명은 한국어로). But \
 keep all code identifiers VERBATIM in their original form — symbol names, method names, \
 class/type names, field names, file paths, and API routes stay as written in the code \
 (영문 식별자 원문 유지), never translated or transliterated. Example: \
-\"OrderService.createOrder()에 couponId 적용\".
+\"주문 생성 흐름에 쿠폰 할인을 도입한다\".
 
 You MAY also suggest cluster merges/splits in `mergeSuggestions` / `splitSuggestions`, but \
 ONLY when clearly warranted — leave them empty otherwise (these are display-only hints, \
 never applied automatically). Reference clusters by `clusterId`.
 
 Hard rules:
-  - Mention ONLY symbols present in the cluster's `changedSymbols`. Never invent a symbol, \
-a class, a method, or a side effect.
+  - The `summary` describes the cluster's single overall intent/behaviour change. Do NOT \
+enumerate individual symbols, do NOT list every changed function/type one by one, and do \
+NOT include line counts or +N/−M / added/removed statistics — those live on the cards.
+  - Mention a symbol name in the summary ONLY when it is genuinely the subject of the \
+intent (e.g. the entrypoint of the flow), and only symbols present in `changedSymbols`. \
+Never invent a symbol, a class, a method, or a side effect.
   - Do not claim tests exist that are not provided.
-  - Keep the summary to 1–3 sentences; do not pad.
+  - Keep the summary to 1–2 sentences; do not pad.
   - When uncertain, describe plainly rather than asserting a cause/effect you can't see.
 
 Output only the structured JSON the schema defines.";

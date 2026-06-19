@@ -185,6 +185,83 @@ async fn big_pr_runs_three_calls_and_orders_across_clusters() {
     }
 }
 
+/// A file seed-card: a singleton whose member card_id is a `<path>::__file` id and whose
+/// name is the path (mirrors `clustercard::build_file_seed_cards`).
+fn file_seed(seed_id: &str, path: &str, kind: SymbolKind) -> ClusterCardInput {
+    ClusterCardInput {
+        cluster_id: seed_id.to_string(),
+        algorithmic_type_hint: ClusterKind::Infra,
+        entrypoint_candidates: vec![],
+        changed_symbols: vec![ChangedSymbolIn {
+            card_id: format!("{path}::__file"),
+            name: path.to_string(),
+            kind,
+            change_type: ChangeType::Added,
+            summary: format!("Adds {path}."),
+            renamed_from: None,
+            signature_change: None,
+        }],
+        relation_hints: RelationHints::default(),
+        contracts_changed: vec![],
+        related_tests: vec![],
+        deleted_symbols: vec![],
+        rename_pairs: vec![],
+        signature_changes: vec![],
+    }
+}
+
+#[tokio::test]
+async fn file_seeds_are_clustered_into_an_infra_topic_not_unclustered() {
+    // Issue C: symbol-less infra/config files (CI, cargo, caddy) must enter the whitelist and
+    // be groupable into an Infra cluster — NOT dropped to Unclustered. Here one code symbol +
+    // three infra file seeds; the AI groups the 3 files into one infra cluster.
+    let ci = ".github/workflows/ci.yml";
+    let cargo = "Cargo.toml";
+    let caddy = "Caddyfile";
+    let cards = vec![
+        card("seed-1", &[("a", "init_metrics")]),
+        file_seed("file-seed-1", ci, SymbolKind::Config),
+        file_seed("file-seed-2", cargo, SymbolKind::Config),
+        file_seed("file-seed-3", caddy, SymbolKind::Config),
+    ];
+    // 4 symbols total ≤ SMALL_PR_SYMBOLS ⇒ combined branch (1 call) + label (1 call).
+    let ci_id = format!("{ci}::__file");
+    let cargo_id = format!("{cargo}::__file");
+    let caddy_id = format!("{caddy}::__file");
+    let provider = SeqProvider::new(vec![
+        json!({
+            "clusters": [
+                { "clusterId": "k1", "memberCardIds": ["a"], "kind": "flow" },
+                { "clusterId": "k2", "memberCardIds": [ci_id, cargo_id, caddy_id], "kind": "infra" }
+            ],
+            "unclustered": [],
+            "clusterOrder": ["k1", "k2"]
+        }),
+        json!({
+            "clusters": [
+                { "clusterId": "k1", "title": "메트릭 초기화", "summary": "메트릭 수집을 초기화한다." },
+                { "clusterId": "k2", "title": "HTTPS 인프라 구성", "summary": "Caddy 리버스 프록시로 HTTPS를 적용한다." }
+            ],
+            "mergeSuggestions": [],
+            "splitSuggestions": []
+        }),
+    ]);
+
+    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default())
+        .await
+        .expect("pipeline succeeds");
+
+    // Nothing fell to Unclustered; the 3 infra files form one infra cluster.
+    assert!(layout.unclustered.is_empty(), "infra files are clustered, not unclustered");
+    let infra = layout.clusters.iter().find(|c| c.id == "k2").expect("infra cluster present");
+    assert_eq!(infra.kind, ClusterKind::Infra);
+    assert_eq!(infra.ordered_card_ids.len(), 3);
+    assert!(infra.ordered_card_ids.contains(&ci_id));
+    assert!(infra.ordered_card_ids.contains(&caddy_id));
+    // Every card id (code + 3 files) appears exactly once in the flat order.
+    assert_eq!(layout.ordered_card_ids.len(), 4);
+}
+
 #[tokio::test]
 async fn empty_cards_produce_empty_layout_without_calls() {
     let provider = SeqProvider::new(vec![]);

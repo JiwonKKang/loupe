@@ -213,3 +213,145 @@ async fn all_unclustered_repro() {
     }
     eprintln!("\n[DEBUG-cl9x] ===== end =====\n");
 }
+
+// ===========================================================================
+// [DEBUG-caddy] TEMP diagnosis for ISSUE B — "unclustered 과다" on an infra PR.
+//
+// Full structural breakdown of dearday main...feat/https-via-caddy:
+//   - EVERY Stage-1 card (id / kind / symbol / path / summary) so we can see how
+//     many are file-level (orphan/non-code/added/deleted) vs changed-symbol cards.
+//   - the changed-symbol whitelist (the ONLY ids the AI ever clusters).
+//   - the seeds (first-pass strong-relation components).
+//   - the final layout: which card ids are clustered, which are unclustered, and
+//     CRUCIALLY which cards are in NEITHER (never entered the whitelist at all).
+//
+//   LOUPE_OAUTH_TOKEN=sk-ant-oat01-... \
+//   cargo test -p dearday-loupe -- --ignored --nocapture caddy_unclustered_breakdown
+// (target/base overridable via LOUPE_DEARDAY_{REPO,BASE,TARGET}.)
+// ===========================================================================
+#[tokio::test]
+#[ignore = "live CliProvider — opt in with `cargo test -- --ignored caddy_unclustered_breakdown`"]
+async fn caddy_unclustered_breakdown() {
+    use crate::engine::{
+        analyze_relations, build_cluster_cards_with_signals, build_file_seed_cards, build_review,
+        run_cluster_pipeline,
+    };
+    use std::collections::BTreeSet;
+
+    let repo = std::env::var("LOUPE_DEARDAY_REPO")
+        .unwrap_or_else(|_| "/Users/jiwon/desktop/projects/dearday".to_string());
+    let base = std::env::var("LOUPE_DEARDAY_BASE").unwrap_or_else(|_| "main".to_string());
+    let target = std::env::var("LOUPE_DEARDAY_TARGET")
+        .unwrap_or_else(|_| "feat/https-via-caddy".to_string());
+
+    if !std::path::Path::new(&repo).exists() {
+        eprintln!("[DEBUG-caddy] dearday repo absent — skipping");
+        return;
+    }
+
+    // ---- PURE (no AI) structural facts: cards, whitelist, seeds. ----
+    let review = build_review(&repo, &base, &target).expect("build_review");
+    let analysis = analyze_relations(&repo, &base, &target).expect("analyze_relations");
+    // Symbol seed cards (Stage-③) …
+    let mut cards_in = build_cluster_cards_with_signals(
+        &analysis.seeds,
+        &analysis.hints,
+        &analysis.changed,
+        &review.cards,
+        &analysis.base_signals,
+    );
+    // … PLUS the new file-level seeds (Issue C — infra/config topic clustering). These are
+    // the cards that used to fall straight to Unclustered; they now enter the whitelist.
+    let already_seeded: BTreeSet<String> = cards_in
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter().map(|s| s.card_id.clone()))
+        .collect();
+    let file_seeds = build_file_seed_cards(&review.cards, &already_seeded);
+    eprintln!(
+        "\n[DEBUG-caddy] symbol seed-cards = {}, NEW file seed-cards = {} (these used to be Unclustered)",
+        cards_in.len(),
+        file_seeds.len()
+    );
+    cards_in.extend(file_seeds);
+
+    eprintln!("\n[DEBUG-caddy] ===== ALL Stage-1 CARDS ({}) =====", review.cards.len());
+    for c in &review.cards {
+        eprintln!(
+            "[DEBUG-caddy]   card kind={:<8?} change={:<8?} id={}  | summary={:?}",
+            c.kind, c.change_type, c.id, c.summary
+        );
+    }
+
+    // The whitelist = every changed-symbol card id the AI is allowed to cluster.
+    let whitelist: BTreeSet<String> = cards_in
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter().map(|s| s.card_id.clone()))
+        .collect();
+    eprintln!(
+        "\n[DEBUG-caddy] ===== WHITELIST (changed-symbol cards only) = {} of {} total cards =====",
+        whitelist.len(),
+        review.cards.len()
+    );
+    for id in &whitelist {
+        eprintln!("[DEBUG-caddy]   whitelist id = {id}");
+    }
+
+    // Cards that NEVER enter the AI input (not changed-symbol → not clustered, not unclustered).
+    let not_in_whitelist: Vec<&str> = review
+        .cards
+        .iter()
+        .map(|c| c.id.as_str())
+        .filter(|id| !whitelist.contains(*id))
+        .collect();
+    eprintln!(
+        "\n[DEBUG-caddy] ===== CARDS OUTSIDE THE WHITELIST = {} (file-level / non-code / added / orphan) =====",
+        not_in_whitelist.len()
+    );
+    for id in &not_in_whitelist {
+        eprintln!("[DEBUG-caddy]   NOT-clusterable card id = {id}");
+    }
+
+    eprintln!("\n[DEBUG-caddy] ===== SEEDS ({}) =====", analysis.seeds.len());
+    for s in &analysis.seeds {
+        eprintln!("[DEBUG-caddy]   {} members={} {:?}", s.id, s.card_ids.len(), s.card_ids);
+    }
+
+    // ---- AI path (needs token). ----
+    let Ok(token) = std::env::var("LOUPE_OAUTH_TOKEN") else {
+        eprintln!("\n[DEBUG-caddy] LOUPE_OAUTH_TOKEN not set — stopping after the pure breakdown.");
+        return;
+    };
+    let provider = CliProvider::new(token);
+
+    eprintln!("\n[DEBUG-caddy] ===== run_cluster_pipeline (ALL cards at once) =====");
+    match run_cluster_pipeline(&provider, &cards_in, &analysis.hints).await {
+        Ok(layout) => {
+            let clustered: BTreeSet<&str> = layout
+                .clusters
+                .iter()
+                .flat_map(|c| c.ordered_card_ids.iter().map(String::as_str))
+                .collect();
+            eprintln!(
+                "[DEBUG-caddy] clusters={} clustered_ids={} unclustered={} (whitelist={})",
+                layout.clusters.len(),
+                clustered.len(),
+                layout.unclustered.len(),
+                whitelist.len()
+            );
+            for c in &layout.clusters {
+                eprintln!(
+                    "[DEBUG-caddy]   cluster {} kind={:?} title={:?}\n[DEBUG-caddy]      summary={:?}\n[DEBUG-caddy]      members={:?}",
+                    c.id, c.kind, c.title, c.summary, c.ordered_card_ids
+                );
+            }
+            eprintln!("[DEBUG-caddy]   unclustered ids = {:?}", layout.unclustered);
+            eprintln!(
+                "\n[DEBUG-caddy] SANITY: every whitelist id is clustered-or-unclustered? {}",
+                whitelist.iter().all(|id| clustered.contains(id.as_str())
+                    || layout.unclustered.iter().any(|u| u == id))
+            );
+        }
+        Err(e) => eprintln!("[DEBUG-caddy] run_cluster_pipeline ERR {e}"),
+    }
+    eprintln!("\n[DEBUG-caddy] ===== end =====\n");
+}

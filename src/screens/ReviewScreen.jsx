@@ -17,7 +17,7 @@ const KIND_META = {
   'domain-concept': { color: 'var(--syn-type, #82aaff)', label: 'Domain' },
   'shared-foundation': { color: 'var(--syn-func, #7fdbca)', label: 'Shared' },
   infra: { color: 'var(--text-tertiary)', label: 'Infra' },
-  unclustered: { color: 'var(--text-faint)', label: 'Unclustered' },
+  unclustered: { color: 'var(--text-faint)', label: '기타' },
 };
 
 export default function ReviewScreen(props) {

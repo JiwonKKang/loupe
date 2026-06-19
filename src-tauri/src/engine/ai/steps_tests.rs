@@ -452,13 +452,14 @@ fn label_input(cluster_id: &str, syms: &[(&str, &str)]) -> LabelInput {
     LabelInput {
         cluster_id: cluster_id.to_string(),
         kind: ClusterKind::Flow,
+        // The second tuple element (a stat summary) is intentionally ignored: LabelSymbolIn
+        // no longer carries a summary (Issue A — per-card stats must not reach the label call).
         changed_symbols: syms
             .iter()
-            .map(|(n, s)| LabelSymbolIn {
+            .map(|(n, _s)| LabelSymbolIn {
                 name: n.to_string(),
                 kind: SymbolKind::Function,
                 change_type: ChangeType::Modified,
-                summary: s.to_string(),
             })
             .collect(),
     }
