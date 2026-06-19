@@ -187,11 +187,12 @@ pub fn verify_labels(
 
     for l in &mut labels.clusters {
         // B1: title/summary must never be empty — substitute a safe fallback.
+        // B1 fallback strings are 한국어 (label 출력은 한국어로 확정).
         if l.title.trim().is_empty() {
-            l.title = "Changes".to_string();
+            l.title = "변경 사항".to_string();
         }
         if l.summary.trim().is_empty() {
-            l.summary = "Changes in this cluster.".to_string();
+            l.summary = "이 클러스터의 변경 사항입니다.".to_string();
         }
         // M4: code-identifier tokens in the text not present in the input are suspicious.
         let mut bad = suspicious_identifiers(&l.title, allowed_names);

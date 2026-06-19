@@ -567,8 +567,9 @@ fn backfill_missing_labels(mut labels: LabelResult, inputs: &[LabelInput]) -> La
     for inp in missing {
         labels.clusters.push(ClusterLabel {
             cluster_id: inp.cluster_id.clone(),
-            title: "Changes".to_string(),
-            summary: "Changes in this cluster.".to_string(),
+            // B1 fallback 문자열도 한국어 (label 한국어 확정).
+            title: "변경 사항".to_string(),
+            summary: "이 클러스터의 변경 사항입니다.".to_string(),
         });
     }
     labels

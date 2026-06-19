@@ -39,6 +39,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 futures-util = "0.3"
 async-trait = "0.1"
 
+# --- ⑦ SHA caching (planning §8.2 / §8.1; v2-critique M2/M3) ---
+# rusqlite `bundled`: vendored SQLite ⇒ no system libsqlite3 dep (3-OS Tauri builds).
+# The cache `Connection` is wrapped in a `Mutex` (M2) with WAL + busy_timeout.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# sha2: SHA-256 of the normalized `ClusterCardInput` (card_hash) + schema_ver mix-in.
+sha2 = "0.10"
+
 [dev-dependencies]
 tempfile = "3"
 

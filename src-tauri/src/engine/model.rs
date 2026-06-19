@@ -110,7 +110,8 @@ pub const T_CTX: &str = "ctx";
 // ---------------------------------------------------------------------------
 
 /// AI cluster metadata: id -> title/summary/kind + the ordered card ids inside it.
-#[derive(Serialize, Debug, Clone, PartialEq, Default)]
+/// `Deserialize` so the ⑦ cache can round-trip a stored `ClusterLayout` (which holds these).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Cluster {
     /// "cluster-1" (volatile label — excluded from the cache card-hash).
@@ -172,7 +173,8 @@ pub struct DefinitionOverview {
 }
 
 /// §6.3 merge/split suggestion — display only, never auto-applied.
-#[derive(Serialize, Debug, Clone, PartialEq, Default)]
+/// `Deserialize` so the ⑦ cache can round-trip a stored `ClusterLayout` (which holds these).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Suggestion {
     /// "merge" | "split".

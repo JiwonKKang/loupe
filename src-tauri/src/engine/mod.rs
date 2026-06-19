@@ -9,6 +9,7 @@
 pub mod ai;
 mod basesignals;
 mod branches;
+mod cache;
 mod cards;
 mod clustercard;
 mod gitdiff;
@@ -39,6 +40,11 @@ pub use clustercard::{
 // Stage-② base-AST signals (deleted symbols / renames / signature changes). Pure, no AI.
 #[allow(unused_imports)]
 pub use basesignals::{DeletedSymbol, FileBaseSignals, RenamePair, SignatureChange};
+// ⑦ SHA caching (planning §8.1/§8.2/§8.4; M2 Mutex<Connection>+WAL, M3 merge-base key).
+#[allow(unused_imports)]
+pub use cache::{card_hash, Cache, SCHEMA_VER};
+#[allow(unused_imports)]
+pub use gitdiff::DiffShas;
 
 #[derive(Debug)]
 pub enum EngineError {
@@ -251,7 +257,10 @@ pub fn analyze_relations(
 /// The final Stage-④+⑤+⑥ layout: ordered, labelled clusters + the flat order, ready to be
 /// folded into `ReviewData` by the IPC orchestrator (a later stage). Stage-1's `ReviewData`
 /// stays untouched — this is the AI sidecar.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+///
+/// `Deserialize` is required so the ⑦ cache can round-trip a stored layout/fragment back
+/// out of SQLite (`cache::Cache::get_layout` / `get_cluster`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterLayout {
     /// Clusters in inter-cluster order; each carries its title/summary/kind and the
@@ -312,6 +321,174 @@ pub async fn analyze_clusters(
     run_cluster_pipeline(provider, &cards, &analysis.hints)
         .await
         .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))
+}
+
+/// ⑦ **Cached** Stage-③→⑥ entry point (planning §8.1/§8.2/§8.4; v2-critique M2/M3).
+///
+/// Same result as [`analyze_clusters`] but with the SHA cache in front:
+///  1. Resolve `(merge_base_sha, head_sha)` (M3 — merge-base, not base tip).
+///  2. **Full-layout hit** (`review_layout` keyed by head): return immediately with **AI 0
+///     calls** — the 5분→즉시 / §8.1 결정성 path (same head ⇒ byte-identical layout).
+///  3. **Miss**: build the seed cards, hash each (`card_hash`, 부분 무효화 key), and split
+///     them into cached seeds (`cluster_result` hit — reused, AI skipped even if head moved)
+///     and uncached seeds (AI runs only for these). Per-seed fragments are merged into the
+///     final layout, then every uncached fragment **and** the full layout are stored.
+///
+/// Stage-1's `ReviewData` is untouched (사이드카). The `cache_dir` is a parameter (tests pass
+/// a tempdir; IPC will pass the app data dir later — deferred).
+pub async fn analyze_clusters_cached(
+    provider: &dyn ai::LlmProvider,
+    cache: &cache::Cache,
+    repo_path: &str,
+    base: &str,
+    target: &str,
+) -> Result<ClusterLayout, EngineError> {
+    // M3: the cache key base is the *merge-base* SHA (the actual 3-dot base), not base tip.
+    let shas = gitdiff::resolve_shas(repo_path, base, target)?;
+
+    // (2) Full-layout hit — same head ⇒ same order, AI 0 calls (§8.1 / §8.4).
+    if let Some(layout) = cache.get_layout(repo_path, &shas.merge_base_sha, &shas.head_sha) {
+        return Ok(layout);
+    }
+
+    // (3) Miss: prepare the seed cards (the per-seed 부분 무효화 unit).
+    let review = build_review(repo_path, base, target)?;
+    let analysis = analyze_relations(repo_path, base, target)?;
+    let cards = clustercard::build_cluster_cards_with_signals(
+        &analysis.seeds,
+        &analysis.hints,
+        &analysis.changed,
+        &review.cards,
+        &analysis.base_signals,
+    );
+
+    let layout = run_cluster_pipeline_cached(
+        provider,
+        cache,
+        repo_path,
+        &shas.merge_base_sha,
+        &cards,
+        &analysis.hints,
+    )
+    .await
+    .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))?;
+
+    // Store the assembled head layout so a re-open is the AI-0-call path.
+    let _ = cache.put_layout(repo_path, &shas.merge_base_sha, &shas.head_sha, &layout);
+    Ok(layout)
+}
+
+/// Run the pipeline **per seed card with the cache** (부분 무효화) and merge the per-seed
+/// fragments into one layout. Each seed card is hashed; a `cluster_result` hit reuses its
+/// stored fragment (no AI), a miss runs [`run_cluster_pipeline`] on just that one seed and
+/// stores the fragment. Fragments are merged in seed (card) order — deterministic.
+///
+/// Running each seed independently is what makes a single seed's result reusable in
+/// isolation when `head` moves: the AI's clustering for seed *i* depends only on seed *i*'s
+/// content (`card_hash`), so an unchanged seed's fragment is bit-identical across heads.
+async fn run_cluster_pipeline_cached(
+    provider: &dyn ai::LlmProvider,
+    cache: &cache::Cache,
+    repo_path: &str,
+    merge_base_sha: &str,
+    cards: &[clustercard::ClusterCardInput],
+    hints: &relations::RelationHints,
+) -> Result<ClusterLayout, ai::LlmError> {
+    let mut fragments: Vec<ClusterLayout> = Vec::with_capacity(cards.len());
+
+    for card in cards {
+        let hash = cache::card_hash(card);
+
+        // 부분 무효화: a seed whose content (card_hash) is cached is reused — AI skipped.
+        if let Some(fragment) = cache.get_cluster(repo_path, merge_base_sha, &hash) {
+            fragments.push(fragment);
+            continue;
+        }
+
+        // Miss: run the AI pipeline on this single seed, restricting the relation hints to
+        // its members (so the per-seed run is self-contained / cache-stable).
+        let one = std::slice::from_ref(card);
+        let seed_hints = restrict_hints_to_cards(hints, one);
+        let fragment = run_cluster_pipeline(provider, one, &seed_hints).await?;
+
+        let _ = cache.put_cluster(repo_path, merge_base_sha, &hash, &fragment);
+        fragments.push(fragment);
+    }
+
+    Ok(merge_fragments(fragments))
+}
+
+/// Restrict relation hints to pairs whose *both* endpoints are member card ids of `cards`
+/// (so a single-seed pipeline run only sees its own intra-seed evidence). Deterministic.
+fn restrict_hints_to_cards(
+    hints: &relations::RelationHints,
+    cards: &[clustercard::ClusterCardInput],
+) -> relations::RelationHints {
+    let members: std::collections::BTreeSet<&str> = cards
+        .iter()
+        .flat_map(|c| c.changed_symbols.iter().map(|s| s.card_id.as_str()))
+        .collect();
+    let keep = |pairs: &[(String, String)]| -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .filter(|(a, b)| members.contains(a.as_str()) && members.contains(b.as_str()))
+            .cloned()
+            .collect()
+    };
+    relations::RelationHints {
+        strong: keep(&hints.strong),
+        weak: keep(&hints.weak),
+    }
+}
+
+/// Concatenate per-seed [`ClusterLayout`] fragments into one layout, preserving seed order
+/// (deterministic — seeds are sorted).
+///
+/// Each fragment was AI-labelled independently, so two fragments can carry the **same**
+/// cluster id (a model labels every single-seed run `"cluster-1"`). To avoid one swallowing
+/// the other, cluster ids are **re-namespaced per fragment** (`s<frag>::<id>`) and every
+/// reference to a cluster id — `cluster_order` and the suggestions' `cluster_ids` — is
+/// remapped to match. Card-id lists (`ordered_card_ids`, `unclustered`) are concatenated
+/// as-is (cards are disjoint across seeds, so they stay unique).
+fn merge_fragments(fragments: Vec<ClusterLayout>) -> ClusterLayout {
+    let mut clusters: Vec<Cluster> = Vec::new();
+    let mut cluster_order: Vec<String> = Vec::new();
+    let mut ordered_card_ids: Vec<String> = Vec::new();
+    let mut unclustered: Vec<String> = Vec::new();
+    let mut merge_suggestions: Vec<Suggestion> = Vec::new();
+    let mut split_suggestions: Vec<Suggestion> = Vec::new();
+
+    for (fi, frag) in fragments.into_iter().enumerate() {
+        // Per-fragment cluster-id remap so fragments can't collide on a shared label.
+        let remap = |id: &str| format!("s{fi}::{id}");
+
+        for mut c in frag.clusters {
+            c.id = remap(&c.id);
+            clusters.push(c);
+        }
+        for id in &frag.cluster_order {
+            cluster_order.push(remap(id));
+        }
+        ordered_card_ids.extend(frag.ordered_card_ids);
+        unclustered.extend(frag.unclustered);
+        for mut s in frag.merge_suggestions {
+            s.cluster_ids = s.cluster_ids.iter().map(|id| remap(id)).collect();
+            merge_suggestions.push(s);
+        }
+        for mut s in frag.split_suggestions {
+            s.cluster_ids = s.cluster_ids.iter().map(|id| remap(id)).collect();
+            split_suggestions.push(s);
+        }
+    }
+
+    ClusterLayout {
+        clusters,
+        cluster_order,
+        ordered_card_ids,
+        unclustered,
+        merge_suggestions,
+        split_suggestions,
+    }
 }
 
 /// Run clustering → ordering → labelling over the prepared cluster cards and assemble the
@@ -450,7 +627,7 @@ fn assemble_layout(
         let (title, summary) = label_by_cluster
             .get(id.as_str())
             .map(|(t, s)| (t.to_string(), s.to_string()))
-            .unwrap_or_else(|| ("Changes".to_string(), "Changes in this cluster.".to_string()));
+            .unwrap_or_else(|| ("변경 사항".to_string(), "이 클러스터의 변경 사항입니다.".to_string()));
         clusters.push(Cluster {
             id: id.clone(),
             title,
@@ -551,3 +728,11 @@ mod tests;
 #[cfg(test)]
 #[path = "pipeline_tests.rs"]
 mod pipeline_tests;
+
+#[cfg(test)]
+#[path = "cache_pipeline_tests.rs"]
+mod cache_pipeline_tests;
+
+#[cfg(test)]
+#[path = "cache_dearday_test.rs"]
+mod cache_dearday_test;

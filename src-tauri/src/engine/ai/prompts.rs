@@ -143,6 +143,9 @@ Hard rules:
   - Do not assume side effects or tests that are not in the cards.
   - When uncertain, keep symbols in their seed grouping and keep input order.
 
+LANGUAGE: this call emits only ids/kinds (no prose); the later labelling call writes \
+titles/summaries in 한국어 with code identifiers (심볼명/타입명) kept verbatim in 영문 원문.
+
 Output only the structured JSON the schema defines.";
 
 /// AI3 — labelling system prompt (Stage ⑥, planning §6.2 / §6.3 / §10).
@@ -161,6 +164,12 @@ short summary). For EVERY cluster return:
   - `title`: the change in the form [target] + [change action], short (e.g. \"주문 생성 시 \
 쿠폰 할인 적용\", \"결제 실패 이벤트 재시도 정책 변경\"). Never empty.
   - `summary`: 1 to 3 sentences describing what the change does. Never empty.
+
+LANGUAGE (한국어 확정): Write `title` and `summary` in KOREAN (자연어 설명은 한국어로). But \
+keep all code identifiers VERBATIM in their original form — symbol names, method names, \
+class/type names, field names, file paths, and API routes stay as written in the code \
+(영문 식별자 원문 유지), never translated or transliterated. Example: \
+\"OrderService.createOrder()에 couponId 적용\".
 
 You MAY also suggest cluster merges/splits in `mergeSuggestions` / `splitSuggestions`, but \
 ONLY when clearly warranted — leave them empty otherwise (these are display-only hints, \

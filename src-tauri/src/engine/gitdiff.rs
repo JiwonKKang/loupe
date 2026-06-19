@@ -55,6 +55,33 @@ pub enum FileStatus {
     Modified,
 }
 
+/// The two SHAs that fully determine a 3-dot (`base...target`) diff — and therefore the
+/// cache key (v2-critique M3). **`merge_base_sha` is the merge-base of (base, target), NOT
+/// the base branch tip.** The 3-dot diff is `merge-base → target`, so the base branch tip
+/// moving (while the merge-base stays put) does *not* change the diff; keying on the tip
+/// would cause spurious cache misses. `head_sha` is the resolved target commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffShas {
+    /// `merge_base(base, target)` — the actual base of the 3-dot diff (M3).
+    pub merge_base_sha: String,
+    /// Resolved `target` commit (the review's "head"; §8.2 cache unit = commit).
+    pub head_sha: String,
+}
+
+/// Resolve `(merge_base_sha, head_sha)` for a `base...target` 3-dot range **without**
+/// computing the diff (cheap — used by the cache layer to build the key before deciding
+/// whether AI work is even needed). `merge_base_sha` is the merge-base (M3), not base tip.
+pub fn resolve_shas(repo_path: &str, base: &str, target: &str) -> Result<DiffShas, EngineError> {
+    let repo = Repository::open(repo_path)?;
+    let base_oid = resolve_commit(&repo, base)?;
+    let target_oid = resolve_commit(&repo, target)?;
+    let merge_base_oid = repo.merge_base(base_oid, target_oid)?;
+    Ok(DiffShas {
+        merge_base_sha: merge_base_oid.to_string(),
+        head_sha: target_oid.to_string(),
+    })
+}
+
 /// Compute `base...target` (3-dot: target vs. their merge-base) as a list of
 /// per-file diffs, renames detected, full old/new sources attached.
 pub fn diff_three_dot(
@@ -62,6 +89,18 @@ pub fn diff_three_dot(
     base: &str,
     target: &str,
 ) -> Result<Vec<FileDiff>, EngineError> {
+    Ok(diff_three_dot_with_shas(repo_path, base, target)?.0)
+}
+
+/// Like [`diff_three_dot`] but also returns the [`DiffShas`] (merge-base + head) the diff
+/// was computed against, so a caller (the cache layer) gets the exact cache-key SHAs from
+/// the *same* repo open + merge-base resolution — no second `merge_base` round-trip and no
+/// risk of the key drifting from the diff. `merge_base_sha` is the merge-base (M3).
+pub fn diff_three_dot_with_shas(
+    repo_path: &str,
+    base: &str,
+    target: &str,
+) -> Result<(Vec<FileDiff>, DiffShas), EngineError> {
     let repo = Repository::open(repo_path)?;
 
     let base_oid = resolve_commit(&repo, base)?;
@@ -87,7 +126,12 @@ pub fn diff_three_dot(
     find_opts.renames(true).copies(true);
     diff.find_similar(Some(&mut find_opts))?;
 
-    build_file_diffs(&repo, &diff)
+    let files = build_file_diffs(&repo, &diff)?;
+    let shas = DiffShas {
+        merge_base_sha: merge_base_oid.to_string(),
+        head_sha: target_oid.to_string(),
+    };
+    Ok((files, shas))
 }
 
 /// Resolve a ref / branch / SHA string to a commit Oid.
