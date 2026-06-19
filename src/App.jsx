@@ -1,7 +1,10 @@
 /* Loupe UI kit — app shell: screen state, verdicts, threads, keyboard nav.
-   Stage 1: real cards come from the Rust engine via invoke('load_review', …).
-   Onboarding collects repoPath/base/target; everything else (verdicts/threads/
-   spineItems/unresolved) is derived on the front-end from `cards`. */
+   Cards + clusters come from the Rust engine in one shot via
+   invoke('analyze_review', …): Onboarding → loading screen → cluster review.
+   There is no flat intermediate stage — the loading screen holds until the
+   analysis lands, then the two-tier cluster view renders directly.
+   Onboarding collects repoPath/base/target/token; everything else
+   (verdicts/threads/spineItems/unresolved) is derived on the front-end. */
 
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -20,8 +23,9 @@ const UNCLUSTERED = '__unclustered';
 /**
  * Flatten the flat `cards` into the cluster flow order (`orderedCardIds`), trailing the
  * Unclustered bucket, then any cards the layout did not place (defensive — "every change is
- * shown", §3.1). When the analysis has not arrived yet (`orderedCardIds` empty) the flat
- * Stage-1 order is kept, so the review screen is usable the instant `load_review` returns.
+ * shown", §3.1). When the analysis has not arrived yet (`orderedCardIds` empty) the source
+ * card order is kept — but in practice the review screen only renders once analyze_review
+ * has returned both cards and the cluster overlay together.
  */
 function flattenByOrder(cards, orderedCardIds) {
   if (!cards || cards.length === 0) return [];
@@ -44,8 +48,8 @@ export default function App() {
   const [cards, setCards] = React.useState(null);    // null = loading, [] = empty diff
   const [loadError, setLoadError] = React.useState(null);
 
-  // ⑧ — cluster two-tier overlay (filled by the background analyze_review call).
-  // analysisState: 'idle' (Stage-1 only) | 'clustering' (AI running) | 'done' | 'fallback'.
+  // ⑧ — cluster two-tier overlay (filled by analyze_review).
+  // analysisState: 'idle' | 'clustering' (AI running) | 'done' | 'fallback'.
   const [clusters, setClusters] = React.useState([]);
   const [clusterOrder, setClusterOrder] = React.useState([]);
   const [orderedCardIds, setOrderedCardIds] = React.useState([]);
@@ -61,9 +65,12 @@ export default function App() {
   // Guards a stale analyze_review response from clobbering a newer range's state.
   const analyzeSeq = React.useRef(0);
 
-  // Load the review whenever a range is chosen (and on retry). Two-phase:
-  //  (a) load_review → flat cards instantly (the screen is usable right away);
-  //  (b) analyze_review in the background → cluster two-tier (flow order + spine groups).
+  // Load the review whenever a range is chosen (and on retry). Single-phase:
+  // analyze_review returns the cards AND the cluster two-tier (flow order + spine
+  // groups) together. While it runs the loading screen holds; when it lands the
+  // cluster review renders directly — there is NO flat intermediate view.
+  // (A cache hit returns immediately → straight to clusters; a miss can take
+  // minutes, during which the loading screen's staged labels run.)
   const load = React.useCallback((r) => {
     if (!r) return;
     setCards(null);
@@ -73,40 +80,33 @@ export default function App() {
     setThreads([]);
     // Reset the cluster overlay for the new range.
     setClusters([]); setClusterOrder([]); setOrderedCardIds([]); setUnclustered([]);
-    setAnalysisState('idle');
+    setAnalysisState('clustering');
     const seq = ++analyzeSeq.current;
 
-    invoke('load_review', { repoPath: r.repoPath, base: r.base, target: r.target })
+    // analyze_review needs the model token. It returns cards + clusters in one shot.
+    // A failure is fatal here (no flat fallback to fall back to) → surface the error.
+    invoke('analyze_review', {
+      repoPath: r.repoPath, base: r.base, target: r.target, token: r.token,
+    })
       .then((data) => {
         if (seq !== analyzeSeq.current) return;
-        setCards(data.cards); setLoadError(null);
-        // A cache hit may already carry the cluster overlay on load_review — adopt it.
-        if (data.orderedCardIds && data.orderedCardIds.length > 0) applyAnalysis(data, seq);
+        applyAnalysis(data, seq);
       })
       .catch((err) => { if (seq === analyzeSeq.current) { setLoadError(String(err)); setCards([]); } });
-
-    // (b) Background AI cluster analysis. Needs the model token. Failures are non-fatal:
-    // the flat Stage-1 cards stay usable; we just mark the analysis as 'fallback'.
-    if (r.token) {
-      setAnalysisState('clustering');
-      invoke('analyze_review', {
-        repoPath: r.repoPath, base: r.base, target: r.target, token: r.token,
-      })
-        .then((data) => { if (seq === analyzeSeq.current) applyAnalysis(data, seq); })
-        .catch(() => { if (seq === analyzeSeq.current) setAnalysisState('fallback'); });
-    }
   // applyAnalysis is stable (defined below via useCallback).
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Adopt an analyze_review (or cache-hit load_review) payload's cluster overlay.
+  // Adopt an analyze_review payload: the cards and the cluster overlay together.
   const applyAnalysis = React.useCallback((data, seq) => {
     if (seq !== analyzeSeq.current) return;
+    setCards(data.cards || []);
     setClusters(data.clusters || []);
     setClusterOrder(data.clusterOrder || []);
     setOrderedCardIds(data.orderedCardIds || []);
     setUnclustered(data.unclustered || []);
     setAnalysisState(data.analysis === 'fallback' ? 'fallback' : 'done');
+    setLoadError(null);
   }, []);
 
   React.useEffect(() => { load(range); }, [range, load]);
@@ -135,8 +135,9 @@ export default function App() {
   const unclusteredSet = React.useMemo(() => new Set(unclustered), [unclustered]);
 
   // The cluster a card belongs to (id/title/kind/summary), or the Unclustered bucket.
-  // Returns null before any cluster overlay exists, so the spine keeps its Stage-1 file
-  // grouping (and the card shows no cluster band) until the AI analysis actually lands.
+  // The review screen only renders after analyze_review lands, so an overlay is always
+  // present here; the null path is a defensive guard for a fallback that produced no
+  // clusters at all (keeps the file view rather than labelling everything Unclustered).
   const hasOverlay = clusters.length > 0 || unclustered.length > 0;
   const clusterOf = React.useCallback((c) => {
     if (!c) return null;
@@ -145,11 +146,11 @@ export default function App() {
       return { id: cl.id, title: cl.title, kind: cl.kind, summary: cl.summary };
     }
     // Only call a card "Unclustered" once a real overlay exists (engine §3.1); a bare
-    // fallback with no clusters keeps the flat file view rather than labelling everything.
+    // fallback with no clusters keeps the file view rather than labelling everything.
     if (unclusteredSet.has(c.id) || (hasOverlay && (analysisState === 'done' || analysisState === 'fallback'))) {
       return { id: UNCLUSTERED, title: 'Unclustered changes', kind: 'unclustered', summary: '' };
     }
-    return null; // analysis not in yet → no band (flat Stage-1 view).
+    return null; // no overlay → no band (defensive).
   }, [clusterById, unclusteredSet, analysisState, hasOverlay]);
 
   // Position of a card within its cluster ({ pos, of }), for "n / m in this cluster".
@@ -279,7 +280,7 @@ export default function App() {
   if (cards === null) {
     return (
       <React.Fragment>
-        <LoadingScreen analysisState={analysisState} />
+        <LoadingScreen />
         <ScreenSwitcher screen={screen} setScreen={setScreen} />
       </React.Fragment>
     );
@@ -335,12 +336,22 @@ function CenterPane({ children }) {
   );
 }
 
-function LoadingScreen({ analysisState }) {
-  // The loading mark (steady dot + breathing halo). Shown while the engine reads the diff;
-  // if the background AI cluster analysis is already running, say so (a cache miss can take
-  // a while — the label keeps the wait legible).
-  const label = analysisState === 'clustering' ? 'Clustering the change…' : 'Reading the diff…';
-  return <LoupeLoader full label={label} />;
+// The dataflow-clustering stage sequence shown on the full-screen loader while
+// analyze_review runs (cards + clusters arrive together at the end). The labels
+// cycle on a timer and hold on the last one; a cache miss can take minutes, so
+// the staged sequence keeps the wait legible.
+const LOADING_STAGES = [
+  'Reading the diff…',
+  'Tracing data flow…',
+  'Clustering related changes…',
+  'Grouping into chapters…',
+  'Building the review queue…',
+];
+
+function LoadingScreen() {
+  // The loading mark (steady dot + breathing halo) with the staged dataflow
+  // labels. Holds until analyze_review returns the cards + cluster overlay.
+  return <LoupeLoader full stages={LOADING_STAGES} />;
 }
 
 function EmptyDiffScreen({ range, onBack }) {

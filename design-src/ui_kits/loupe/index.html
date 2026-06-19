@@ -45,6 +45,10 @@
     0%, 100% { box-shadow: 0 0 0 5px var(--accent-dim), 0 0 12px 1px rgba(110,139,255,0.30); }
     50%      { box-shadow: 0 0 0 7px var(--accent-dim), 0 0 22px 4px rgba(110,139,255,0.55); }
   }
+  @keyframes loupe-stage-in {
+    from { opacity: 0; transform: translateY(5px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
   ::-webkit-scrollbar { width: 9px; height: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
     border: 2px solid transparent; background-clip: padding-box; }

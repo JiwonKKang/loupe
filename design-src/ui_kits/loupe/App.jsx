@@ -95,9 +95,15 @@ function App() {
     <React.Fragment>
       {screen === 'onboarding' && <Onboarding onFinish={() => {
         setScreen('loading');
-        setTimeout(() => setScreen('review'), 2200);
+        setTimeout(() => setScreen('review'), 3400);
       }} />}
-      {screen === 'loading' && <LoupeLoader full />}
+      {screen === 'loading' && <LoupeLoader full stages={[
+        'Reading the diff…',
+        'Tracing data flow…',
+        'Clustering related changes…',
+        'Grouping into chapters…',
+        'Building the review queue…',
+      ]} />}
       {screen === 'review' && (
         <FileTree tree={window.LoupeData.tree} activeId={card.id} open={treeOpen}
           onToggle={() => setTreeOpen((v) => !v)}
