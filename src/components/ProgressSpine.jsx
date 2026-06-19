@@ -1,10 +1,23 @@
 import React from 'react';
 
+// Cluster-kind accent dot (planning §4.3 kinds + the Unclustered bucket §3.1). Falls back to
+// a neutral tone when the kind is unknown (pre-analysis, Stage-1 file grouping).
+const KIND_COLOR = {
+  flow: 'var(--accent)',
+  contract: 'var(--syn-keyword, #c792ea)',
+  'domain-concept': 'var(--syn-type, #82aaff)',
+  'shared-foundation': 'var(--syn-func, #7fdbca)',
+  infra: 'var(--text-tertiary)',
+  unclustered: 'var(--text-faint)',
+};
+
 /**
  * ProgressSpine — the queue rail.
- * At rest it is a thin "spine" of dots (presence ≈ 0). On hover it expands
- * to reveal the cards in dataflow order, grouped by chapter. This is the
- * narrative of the change; it must never compete with the focused card.
+ * At rest it is a thin "spine" of dots (presence ≈ 0). On hover it expands to reveal the
+ * cards in cluster flow order, grouped by cluster (⑧). Each group header carries the cluster
+ * title, a kind color dot, and (on expand) its summary; the Unclustered bucket trails last in
+ * a dimmed tone. Before the AI analysis arrives the group key is the Stage-1 chapter (file).
+ * This is the narrative of the change; it must never compete with the focused card.
  */
 export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded = false }) {
   const [hover, setHover] = React.useState(false);
@@ -15,12 +28,21 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
     active: 'var(--accent)', pending: 'var(--text-faint)',
   };
 
-  // group consecutive items by chapter, preserving order
+  // group consecutive items by cluster (clusterId), preserving order. Each group remembers
+  // its title/kind/summary + whether it is the Unclustered bucket (rendered dimmed, last).
   const groups = [];
   items.forEach((it) => {
+    const key = it.clusterId != null ? it.clusterId : it.chapter;
     const last = groups[groups.length - 1];
-    if (last && last.chapter === it.chapter) last.items.push(it);
-    else groups.push({ chapter: it.chapter, items: [it] });
+    if (last && last.key === key) last.items.push(it);
+    else groups.push({
+      key,
+      title: it.clusterTitle || it.chapter,
+      kind: it.clusterKind || null,
+      summary: it.clusterSummary || '',
+      isUnclustered: it.clusterId === '__unclustered',
+      items: [it],
+    });
   });
 
   const passed = items.filter((i) => i.status === 'pass' || i.status === 'flag').length;
@@ -48,15 +70,32 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
         gap: expanded ? 22 : 0,
       }}>
         {groups.map((g, gi) => (
-          <div key={gi} style={{ display: 'flex', flexDirection: 'column',
+          <div key={g.key + ':' + gi} style={{ display: 'flex', flexDirection: 'column',
             gap: expanded ? 7 : 9, alignItems: expanded ? 'stretch' : 'center',
-            marginTop: !expanded && gi > 0 ? 12 : 0 }}>
+            // a touch more separation between clusters than between cards
+            marginTop: gi > 0 ? (expanded ? 6 : 14) : 0,
+            opacity: g.isUnclustered ? 0.62 : 1 }}>
             {expanded && (
-              <div style={{
-                font: `var(--weight-semibold) var(--text-xs)/1 var(--font-ui)`,
-                letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase',
-                color: 'var(--text-tertiary)', marginBottom: 3, paddingLeft: 2,
-              }}>{g.chapter}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4,
+                marginBottom: 3, paddingLeft: 2 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: 999, flex: 'none',
+                    background: KIND_COLOR[g.kind] || 'var(--text-faint)' }} />
+                  <span style={{
+                    font: `var(--weight-semibold) var(--text-xs)/1.2 var(--font-ui)`,
+                    letterSpacing: g.kind ? 'var(--tracking-snug)' : 'var(--tracking-caps)',
+                    textTransform: g.kind ? 'none' : 'uppercase',
+                    color: g.isUnclustered ? 'var(--text-faint)' : 'var(--text-secondary)',
+                    minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{g.title}</span>
+                </div>
+                {g.summary && (
+                  <span style={{ font: `var(--text-xs)/1.45 var(--font-ui)`,
+                    color: 'var(--text-faint)', paddingLeft: 14,
+                    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                    overflow: 'hidden' }}>{g.summary}</span>
+                )}
+              </div>
             )}
             {g.items.map((it) => {
               const active = it.id === activeId;

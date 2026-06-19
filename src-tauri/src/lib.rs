@@ -1,5 +1,7 @@
 mod engine;
 
+use tauri::{AppHandle, Manager};
+
 /// Build the review payload for `base...target` in the repo at `repo_path`.
 /// The front-end calls this via `invoke('load_review', { repoPath, base, target })`.
 #[tauri::command]
@@ -9,6 +11,48 @@ fn load_review(
     target: String,
 ) -> Result<engine::ReviewData, String> {
     engine::build_review(&repo_path, &base, &target).map_err(|e| e.to_string())
+}
+
+/// ⑧ — the full Stage-1 + Stage-2 (AI cluster) payload for the review screen.
+///
+/// The front-end calls this in the background right after `load_review` (which gives the flat
+/// cards instantly): `invoke('analyze_review', { repoPath, base, target, token })`. A cache hit
+/// returns immediately (same head ⇒ same order, AI 0 calls); a miss runs the AI pipeline (~몇
+/// 분) while the front-end shows the cluster-analysis loader.
+///
+/// Auth: the `token` is the onboarding setup-token (`claude setup-token`), used to build the
+/// `CliProvider` (Sonnet via the `claude` CLI). It is moved straight into the provider and
+/// **never logged** (the provider passes it to the child via env, never on argv). When empty,
+/// we error out rather than shelling out unauthenticated.
+///
+/// Cache: `analyze_review` opens its SQLite cache under `<app_data_dir>/loupe` (resolved from
+/// the Tauri path API), so results persist across app restarts.
+#[tauri::command]
+async fn analyze_review(
+    app: AppHandle,
+    repo_path: String,
+    base: String,
+    target: String,
+    token: String,
+) -> Result<engine::ReviewData, String> {
+    if token.trim().is_empty() {
+        return Err("missing model token — finish onboarding first".to_string());
+    }
+
+    // <app_data_dir>/loupe (created on demand by the cache layer).
+    let cache_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve app data dir: {e}"))?
+        .join("loupe");
+
+    // CliProvider holds the setup-token (Sonnet via the `claude` CLI). `token` is moved in and
+    // never logged. The trait object is what the engine consumes.
+    let provider = engine::ai::cli::CliProvider::new(token);
+
+    engine::analyze_review(&provider, &cache_dir, &repo_path, &base, &target)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Local branches of the repo at `repo_path`, for the onboarding range picker.
@@ -36,7 +80,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_review, list_branches])
+        .invoke_handler(tauri::generate_handler![
+            load_review,
+            analyze_review,
+            list_branches
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

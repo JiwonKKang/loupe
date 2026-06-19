@@ -323,6 +323,71 @@ pub async fn analyze_clusters(
         .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))
 }
 
+/// ⑧ IPC entry point: the full Stage-1 + Stage-2 payload for the front-end.
+///
+/// Runs Stage-1 [`build_review`] (the `cards` diff-render contract, returned untouched), then
+/// the ⑦-cached AI cluster pipeline ([`analyze_clusters_cached`]), and **folds** the resulting
+/// [`ClusterLayout`] back onto the `ReviewData` the front-end already knows: it fills
+/// `clusters` / `cluster_order` / `ordered_card_ids` / `unclustered` / `merge_suggestions` /
+/// `split_suggestions`, stamps each card's `cluster_id`, records the `(head_sha, base_sha)`
+/// cache markers, and sets `analysis = Done`. The `cards` themselves are never re-ordered —
+/// `ordered_card_ids` carries the cluster flow order; the front-end flattens by it (m3 stable
+/// id ⇒ same head = same order).
+///
+/// `cache_dir` is `<app_data_dir>/loupe` (the IPC layer passes it; tests can pass a tempdir).
+/// The provider is injected (the IPC layer builds a `CliProvider` from the onboarding
+/// setup-token). On AI failure the `Err` propagates so the caller can decide (the front-end
+/// keeps showing the Stage-1 flat cards); this function does not itself apply the ⑩ fallback.
+pub async fn analyze_review(
+    provider: &dyn ai::LlmProvider,
+    cache_dir: &std::path::Path,
+    repo_path: &str,
+    base: &str,
+    target: &str,
+) -> Result<ReviewData, EngineError> {
+    // Stage-1: the diff-render cards (the card-id source of truth / whitelist).
+    let mut review = build_review(repo_path, base, target)?;
+
+    // ⑦-cached AI cluster pipeline. The cache db lives under `<app_data_dir>/loupe`.
+    let cache = cache::Cache::open_in_dir(cache_dir)
+        .map_err(|e| EngineError::Parse(format!("cache open failed: {e}")))?;
+    let layout = analyze_clusters_cached(provider, &cache, repo_path, base, target).await?;
+
+    // The 3-dot SHAs are the determinism markers the front-end shows / keys on.
+    let shas = gitdiff::resolve_shas(repo_path, base, target)?;
+
+    fold_layout(&mut review, layout, shas);
+    Ok(review)
+}
+
+/// Fold a [`ClusterLayout`] onto a Stage-1 [`ReviewData`]: copy the cluster two-tier across,
+/// stamp every card's `cluster_id` from the cluster that owns it, set the determinism markers
+/// and `analysis = Done`. Pure (no IO) so it is unit-testable on synthetic input.
+fn fold_layout(review: &mut ReviewData, layout: ClusterLayout, shas: gitdiff::DiffShas) {
+    use std::collections::HashMap;
+
+    // card_id -> owning cluster id (a card is in at most one cluster; unclustered ⇒ None).
+    let mut owner: HashMap<&str, &str> = HashMap::new();
+    for c in &layout.clusters {
+        for cid in &c.ordered_card_ids {
+            owner.insert(cid.as_str(), c.id.as_str());
+        }
+    }
+    for card in &mut review.cards {
+        card.cluster_id = owner.get(card.id.as_str()).map(|s| s.to_string());
+    }
+
+    review.clusters = layout.clusters;
+    review.cluster_order = layout.cluster_order;
+    review.ordered_card_ids = layout.ordered_card_ids;
+    review.unclustered = layout.unclustered;
+    review.merge_suggestions = layout.merge_suggestions;
+    review.split_suggestions = layout.split_suggestions;
+    review.head_sha = shas.head_sha;
+    review.base_sha = shas.merge_base_sha;
+    review.analysis = AnalysisState::Done;
+}
+
 /// ⑦ **Cached** Stage-③→⑥ entry point (planning §8.1/§8.2/§8.4; v2-critique M2/M3).
 ///
 /// Same result as [`analyze_clusters`] but with the SHA cache in front:

@@ -19,7 +19,7 @@
   /* ---- Semantic spacing ---- */
   --gutter-card:   40px;   /* inner padding of the review card     */
   --canvas-pad:    72px;   /* breathing room around the card       */
-  --rail-width:    14px;   /* the queue spine at rest (just dots)  */
+  --rail-width:    18px;   /* the queue spine at rest (dots + active ring; ⑧ no clip) */
   --rail-open:     280px;  /* the queue rail expanded on hover     */
 
   /* ---- Radii (macOS-soft) ---- */

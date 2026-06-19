@@ -10,14 +10,28 @@ import { Button } from '../components/Button';
 import { KeyHint } from '../components/KeyHint';
 import { highlightGo } from '../data/fixtures';
 
+// Cluster-kind accent + label for the card-header band (⑧). Mirrors ProgressSpine's palette.
+const KIND_META = {
+  flow: { color: 'var(--accent)', label: 'Flow' },
+  contract: { color: 'var(--syn-keyword, #c792ea)', label: 'Contract' },
+  'domain-concept': { color: 'var(--syn-type, #82aaff)', label: 'Domain' },
+  'shared-foundation': { color: 'var(--syn-func, #7fdbca)', label: 'Shared' },
+  infra: { color: 'var(--text-tertiary)', label: 'Infra' },
+  unclustered: { color: 'var(--text-faint)', label: 'Unclustered' },
+};
+
 export default function ReviewScreen(props) {
   const {
     card, index, total, dir, base, target, unresolved,
+    cluster, clusterIndex, analysisState,
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
     onPass, onPrev, onNext, onJumpUnresolved,
     threads, onOpenLine, onResolve, onSend,
   } = props;
+
+  // Is this a JIT definition card (⑨ fills the overview; ⑧ leaves the branch placeholder)?
+  const isDefinition = card.kind === 'definition';
 
   // ---- Build aligned split rows (before | after) from the unified line list.
   const rows = React.useMemo(() => {
@@ -174,7 +188,17 @@ export default function ReviewScreen(props) {
             {String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}
           </span>
           <span style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--text-faint)' }} />
-          <span>{card.chapter}</span>
+          <span style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {cluster ? cluster.title : card.chapter}
+          </span>
+          {analysisState === 'clustering' && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5,
+              font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-faint)' }}>
+              <span style={{ width: 5, height: 5, borderRadius: 999, background: 'var(--accent)',
+                animation: 'loupe-core-glow 2s var(--ease-soft) infinite' }} />
+              clustering…
+            </span>
+          )}
           <span style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--text-faint)' }} />
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7,
             font: 'var(--text-xs)/1 var(--font-mono)', color: 'var(--text-tertiary)' }}>
@@ -217,6 +241,34 @@ export default function ReviewScreen(props) {
             {/* Card header */}
             <div style={{ padding: '22px var(--gutter-card) 18px',
               borderBottom: '1px solid var(--border-subtle)' }}>
+              {/* Cluster band — kind badge + cluster title + position in this cluster (⑧). */}
+              {cluster && (() => {
+                const meta = KIND_META[cluster.kind] || KIND_META.unclustered;
+                const muted = cluster.id === '__unclustered';
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 12,
+                    opacity: muted ? 0.7 : 1 }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 20,
+                      padding: '0 8px', borderRadius: 'var(--radius-pill)',
+                      background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)',
+                      font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
+                      letterSpacing: 'var(--tracking-wide)', color: 'var(--text-tertiary)' }}>
+                      <span style={{ width: 6, height: 6, borderRadius: 999, background: meta.color }} />
+                      {meta.label}
+                    </span>
+                    <span style={{ minWidth: 0, font: 'var(--weight-medium) var(--text-sm)/1.2 var(--font-ui)',
+                      color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap' }}>{cluster.title}</span>
+                    {clusterIndex && clusterIndex.of > 1 && (
+                      <span style={{ marginLeft: 'auto', flex: 'none', fontVariantNumeric: 'tabular-nums',
+                        font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-faint)',
+                        letterSpacing: 'var(--tracking-wide)' }}>
+                        {clusterIndex.pos} / {clusterIndex.of} in this cluster
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
                 <span style={{ font: 'var(--weight-semibold) var(--text-md)/1 var(--font-mono)',
                   color: 'var(--text-primary)', letterSpacing: 'var(--tracking-snug)' }}>{card.symbol}</span>
@@ -233,6 +285,20 @@ export default function ReviewScreen(props) {
                 color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.summary}</div>
             </div>
 
+            {/* JIT definition (⑨) — an overview panel instead of a diff. ⑧ leaves the
+                placeholder; the engine's DefinitionOverview fills it in ⑨. */}
+            {isDefinition ? (
+              <div style={{ flex: 1, overflowY: 'auto', padding: '20px var(--gutter-card)',
+                background: 'var(--surface-inset)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
+                  letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase',
+                  color: 'var(--text-tertiary)' }}>Definition overview</div>
+                <div style={{ font: 'var(--text-sm)/1.5 var(--font-ui)', color: 'var(--text-faint)' }}>
+                  Overview of {card.symbol} — shown here just before it is first used.
+                </div>
+              </div>
+            ) : (
+            <React.Fragment>
             {/* Split-diff column headers */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr',
               borderBottom: '1px solid var(--border-subtle)', background: 'var(--surface-inset)' }}>
@@ -289,6 +355,8 @@ export default function ReviewScreen(props) {
                 );
               })}
             </div>
+            </React.Fragment>
+            )}
           </div>
           </div>
         </div>

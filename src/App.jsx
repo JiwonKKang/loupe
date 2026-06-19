@@ -14,11 +14,43 @@ import { buildTree } from './data/fixtures';
 // Note: syntax color is a front-end concern — ReviewScreen imports highlightGo
 // from ./data/fixtures directly. App.jsx only wires data + screen state.
 
+// The Unclustered bucket id (engine §3.1) and its display label/kind.
+const UNCLUSTERED = '__unclustered';
+
+/**
+ * Flatten the flat `cards` into the cluster flow order (`orderedCardIds`), trailing the
+ * Unclustered bucket, then any cards the layout did not place (defensive — "every change is
+ * shown", §3.1). When the analysis has not arrived yet (`orderedCardIds` empty) the flat
+ * Stage-1 order is kept, so the review screen is usable the instant `load_review` returns.
+ */
+function flattenByOrder(cards, orderedCardIds) {
+  if (!cards || cards.length === 0) return [];
+  if (!orderedCardIds || orderedCardIds.length === 0) return cards;
+  const byId = new Map(cards.map((c) => [c.id, c]));
+  const out = [];
+  const seen = new Set();
+  orderedCardIds.forEach((id) => {
+    const c = byId.get(id);
+    if (c && !seen.has(id)) { out.push(c); seen.add(id); }
+  });
+  // Any card not named by the layout still appears (never drop a change).
+  cards.forEach((c) => { if (!seen.has(c.id)) out.push(c); });
+  return out;
+}
+
 export default function App() {
   const [screen, setScreen] = React.useState('onboarding'); // onboarding | review | summary
-  const [range, setRange] = React.useState(null);   // { repoPath, base, target }
+  const [range, setRange] = React.useState(null);   // { repoPath, base, target, token }
   const [cards, setCards] = React.useState(null);    // null = loading, [] = empty diff
   const [loadError, setLoadError] = React.useState(null);
+
+  // ⑧ — cluster two-tier overlay (filled by the background analyze_review call).
+  // analysisState: 'idle' (Stage-1 only) | 'clustering' (AI running) | 'done' | 'fallback'.
+  const [clusters, setClusters] = React.useState([]);
+  const [clusterOrder, setClusterOrder] = React.useState([]);
+  const [orderedCardIds, setOrderedCardIds] = React.useState([]);
+  const [unclustered, setUnclustered] = React.useState([]);
+  const [analysisState, setAnalysisState] = React.useState('idle');
 
   const [index, setIndex] = React.useState(0);
   const [dir, setDir] = React.useState(1);
@@ -26,8 +58,12 @@ export default function App() {
   const [threads, setThreads] = React.useState([]);
   const [treeOpen, setTreeOpen] = React.useState(false);
   const tid = React.useRef(1);
+  // Guards a stale analyze_review response from clobbering a newer range's state.
+  const analyzeSeq = React.useRef(0);
 
-  // Load the review whenever a range is chosen (and on retry).
+  // Load the review whenever a range is chosen (and on retry). Two-phase:
+  //  (a) load_review → flat cards instantly (the screen is usable right away);
+  //  (b) analyze_review in the background → cluster two-tier (flow order + spine groups).
   const load = React.useCallback((r) => {
     if (!r) return;
     setCards(null);
@@ -35,30 +71,116 @@ export default function App() {
     setIndex(0);
     setVerdicts({});
     setThreads([]);
+    // Reset the cluster overlay for the new range.
+    setClusters([]); setClusterOrder([]); setOrderedCardIds([]); setUnclustered([]);
+    setAnalysisState('idle');
+    const seq = ++analyzeSeq.current;
+
     invoke('load_review', { repoPath: r.repoPath, base: r.base, target: r.target })
-      .then((data) => { setCards(data.cards); setLoadError(null); })
-      .catch((err) => { setLoadError(String(err)); setCards([]); });
+      .then((data) => {
+        if (seq !== analyzeSeq.current) return;
+        setCards(data.cards); setLoadError(null);
+        // A cache hit may already carry the cluster overlay on load_review — adopt it.
+        if (data.orderedCardIds && data.orderedCardIds.length > 0) applyAnalysis(data, seq);
+      })
+      .catch((err) => { if (seq === analyzeSeq.current) { setLoadError(String(err)); setCards([]); } });
+
+    // (b) Background AI cluster analysis. Needs the model token. Failures are non-fatal:
+    // the flat Stage-1 cards stay usable; we just mark the analysis as 'fallback'.
+    if (r.token) {
+      setAnalysisState('clustering');
+      invoke('analyze_review', {
+        repoPath: r.repoPath, base: r.base, target: r.target, token: r.token,
+      })
+        .then((data) => { if (seq === analyzeSeq.current) applyAnalysis(data, seq); })
+        .catch(() => { if (seq === analyzeSeq.current) setAnalysisState('fallback'); });
+    }
+  // applyAnalysis is stable (defined below via useCallback).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Adopt an analyze_review (or cache-hit load_review) payload's cluster overlay.
+  const applyAnalysis = React.useCallback((data, seq) => {
+    if (seq !== analyzeSeq.current) return;
+    setClusters(data.clusters || []);
+    setClusterOrder(data.clusterOrder || []);
+    setOrderedCardIds(data.orderedCardIds || []);
+    setUnclustered(data.unclustered || []);
+    setAnalysisState(data.analysis === 'fallback' ? 'fallback' : 'done');
   }, []);
 
   React.useEffect(() => { load(range); }, [range, load]);
 
   const startReview = (r) => {
-    setRange({ repoPath: r.repoPath, base: r.base || 'main', target: r.target });
+    setRange({ repoPath: r.repoPath, base: r.base || 'main', target: r.target, token: r.token });
     setScreen('review');
   };
 
   // Derived (safe even when cards is null — guarded reads).
-  const list = cards || [];
+  // Flat cards re-ordered into cluster flow order once the analysis arrives (§3.1: every
+  // card still appears, Unclustered trailing). Index/keyboard nav are unchanged — they just
+  // walk this re-ordered list.
+  const list = React.useMemo(
+    () => flattenByOrder(cards, orderedCardIds),
+    [cards, orderedCardIds],
+  );
   const card = list[index];
+
+  // cluster id -> its title/kind, for spine grouping + the card's cluster band.
+  const clusterById = React.useMemo(() => {
+    const m = new Map();
+    clusters.forEach((c) => m.set(c.id, c));
+    return m;
+  }, [clusters]);
+  const unclusteredSet = React.useMemo(() => new Set(unclustered), [unclustered]);
+
+  // The cluster a card belongs to (id/title/kind/summary), or the Unclustered bucket.
+  // Returns null before any cluster overlay exists, so the spine keeps its Stage-1 file
+  // grouping (and the card shows no cluster band) until the AI analysis actually lands.
+  const hasOverlay = clusters.length > 0 || unclustered.length > 0;
+  const clusterOf = React.useCallback((c) => {
+    if (!c) return null;
+    if (c.clusterId && clusterById.has(c.clusterId)) {
+      const cl = clusterById.get(c.clusterId);
+      return { id: cl.id, title: cl.title, kind: cl.kind, summary: cl.summary };
+    }
+    // Only call a card "Unclustered" once a real overlay exists (engine §3.1); a bare
+    // fallback with no clusters keeps the flat file view rather than labelling everything.
+    if (unclusteredSet.has(c.id) || (hasOverlay && (analysisState === 'done' || analysisState === 'fallback'))) {
+      return { id: UNCLUSTERED, title: 'Unclustered changes', kind: 'unclustered', summary: '' };
+    }
+    return null; // analysis not in yet → no band (flat Stage-1 view).
+  }, [clusterById, unclusteredSet, analysisState, hasOverlay]);
+
+  // Position of a card within its cluster ({ pos, of }), for "n / m in this cluster".
+  const clusterPosition = React.useCallback((c) => {
+    const cl = clusterOf(c);
+    if (!cl) return null;
+    const members = list.filter((x) => {
+      const xc = clusterOf(x);
+      return xc && xc.id === cl.id;
+    });
+    const pos = members.findIndex((x) => x.id === c.id);
+    if (pos < 0) return null;
+    return { pos: pos + 1, of: members.length };
+  }, [list, clusterOf]);
 
   const threadCount = (cid) => threads.filter((t) => t.cardId === cid).length;
   // A card with unresolved threads IS the "flag" (Needs attention).
   const hasUnresolved = (cid) => threads.some((t) => t.cardId === cid && !t.resolved);
-  const spineItems = list.map((c) => ({
-    id: c.id, symbol: c.symbol, label: c.symbol, chapter: c.chapter,
-    file: c.path.split('/').pop(), threads: threadCount(c.id),
-    status: hasUnresolved(c.id) ? 'flag' : (verdicts[c.id] === 'pass' ? 'pass' : 'pending'),
-  }));
+  const spineItems = list.map((c) => {
+    const cl = clusterOf(c);
+    // Group key: cluster id when analysed, else the Stage-1 chapter (file) so the spine is
+    // still grouped before the AI overlay arrives.
+    const clusterId = cl ? cl.id : c.chapter;
+    return {
+      id: c.id, symbol: c.symbol, label: c.symbol, chapter: c.chapter,
+      clusterId, clusterTitle: cl ? cl.title : c.chapter,
+      clusterKind: cl ? cl.kind : null, clusterSummary: cl ? cl.summary : '',
+      file: c.path.split('/').pop(), threads: threadCount(c.id),
+      status: hasUnresolved(c.id) ? 'flag' : (verdicts[c.id] === 'pass' ? 'pass' : 'pending'),
+    };
+  });
   const unresolved = threads.filter((t) => !t.resolved).length;
   // Changed-files tree for the right-hand FileTree sidebar (built from the
   // real cards returned by the engine).
@@ -157,7 +279,7 @@ export default function App() {
   if (cards === null) {
     return (
       <React.Fragment>
-        <LoadingScreen />
+        <LoadingScreen analysisState={analysisState} />
         <ScreenSwitcher screen={screen} setScreen={setScreen} />
       </React.Fragment>
     );
@@ -182,6 +304,8 @@ export default function App() {
         <ReviewScreen
           card={card} index={index} total={list.length} dir={dir}
           base={range ? range.base : 'base'} target={range ? range.target : 'target'} unresolved={unresolved}
+          cluster={clusterOf(card)} clusterIndex={clusterPosition(card)}
+          analysisState={analysisState}
           onOpenSummary={() => setScreen('summary')}
           spineItems={spineItems} onSelect={(id) => { const i = list.findIndex((c) => c.id === id); goTo(i, i > index ? 1 : -1); }}
           verdict={verdicts[card.id]} flagged={hasUnresolved(card.id)}
@@ -211,10 +335,12 @@ function CenterPane({ children }) {
   );
 }
 
-function LoadingScreen() {
-  // The loading mark (steady dot + breathing halo). Shown while the engine
-  // reads the diff and extracts changed symbols.
-  return <LoupeLoader full label="Reading the diff…" />;
+function LoadingScreen({ analysisState }) {
+  // The loading mark (steady dot + breathing halo). Shown while the engine reads the diff;
+  // if the background AI cluster analysis is already running, say so (a cache miss can take
+  // a while — the label keeps the wait legible).
+  const label = analysisState === 'clustering' ? 'Clustering the change…' : 'Reading the diff…';
+  return <LoupeLoader full label={label} />;
 }
 
 function EmptyDiffScreen({ range, onBack }) {

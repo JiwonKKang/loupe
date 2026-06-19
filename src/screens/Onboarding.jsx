@@ -282,7 +282,8 @@ export default function Onboarding(props) {
             {step < 2
               ? <Button variant="primary" disabled={!canNext} onClick={() => setStep(step + 1)}>Continue</Button>
               : <Button variant="primary" disabled={!canNext}
-                  onClick={() => props.onFinish({ repoPath: repo.trim(), base: base.trim(), target: target.trim() })}>Start review</Button>}
+                  onClick={() => props.onFinish({ repoPath: repo.trim(), base: base.trim(), target: target.trim(),
+                    token: (apiKey.trim() || token.trim()) })}>Start review</Button>}
           </div>
         </div>
       </div>
