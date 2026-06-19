@@ -10,16 +10,6 @@ import { Button } from '../components/Button';
 import { KeyHint } from '../components/KeyHint';
 import { highlightGo } from '../data/fixtures';
 
-// Cluster-kind accent + label for the card-header band (⑧). Mirrors ProgressSpine's palette.
-const KIND_META = {
-  flow: { color: 'var(--accent)', label: 'Flow' },
-  contract: { color: 'var(--syn-keyword, #c792ea)', label: 'Contract' },
-  'domain-concept': { color: 'var(--syn-type, #82aaff)', label: 'Domain' },
-  'shared-foundation': { color: 'var(--syn-func, #7fdbca)', label: 'Shared' },
-  infra: { color: 'var(--text-tertiary)', label: 'Infra' },
-  unclustered: { color: 'var(--text-faint)', label: '기타' },
-};
-
 export default function ReviewScreen(props) {
   const {
     card, index, total, dir, base, target, unresolved,
@@ -73,6 +63,41 @@ export default function ReviewScreen(props) {
   // thread lookup keyed by row
   const threadByRow = {};
   threads.forEach((t) => { threadByRow[t.lineN] = t; });
+
+  // ---- Fold unchanged context so big functions fit at a glance ----
+  // Keep CONTEXT lines of context around each change; collapse the rest into
+  // a thin "⋯ N unchanged lines" divider the reviewer can expand. Font stays
+  // large; only the changes (the point of the card) compete for the eye.
+  const [expanded, setExpanded] = React.useState(() => new Set());
+  React.useEffect(() => { setExpanded(new Set()); }, [card.id]);
+  const CONTEXT = 2;
+  const display = (() => {
+    const items = []; const N = rows.length; let i = 0;
+    const hasThread = (a, b) => { for (let k = a; k < b; k++) if (threadByRow[k]) return true; return false; };
+    while (i < N) {
+      if (rows[i].kind !== 'ctx') { items.push({ type: 'row', r: i, row: rows[i] }); i++; continue; }
+      let j = i; while (j < N && rows[j].kind === 'ctx') j++;
+      const runLen = j - i;
+      const keepTop = i === 0 ? 0 : CONTEXT;
+      const keepBottom = j === N ? 0 : CONTEXT;
+      if (expanded.has(i) || hasThread(i, j) || runLen <= keepTop + keepBottom + 1) {
+        for (let k = i; k < j; k++) items.push({ type: 'row', r: k, row: rows[k] });
+      } else {
+        for (let k = i; k < i + keepTop; k++) items.push({ type: 'row', r: k, row: rows[k] });
+        items.push({ type: 'fold', key: i, count: runLen - keepTop - keepBottom });
+        for (let k = j - keepBottom; k < j; k++) items.push({ type: 'row', r: k, row: rows[k] });
+      }
+      i = j;
+    }
+    return items;
+  })();
+
+  // Adaptive code size: a brand-new function is all additions (nothing to
+  // fold), so scale the font to how many rows actually show — fewer rows get
+  // a comfortable size, long ones shrink toward a readable floor (never tiny)
+  // so the card needs little or no scrolling.
+  const rowCount = display.reduce((n, it) => n + (it.type === 'row' ? 1 : 0), 0);
+  const codeFs = rowCount <= 16 ? 14 : rowCount <= 24 ? 13 : rowCount <= 34 ? 12 : 11;
 
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -135,7 +160,7 @@ export default function ReviewScreen(props) {
     } : {};
     return (
       <div {...handlers} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '20px 30px 12px 1fr',
-        alignItems: 'baseline', background: bg, cursor: 'default',
+        alignItems: 'start', background: bg, cursor: 'default',
         boxShadow,
         minWidth: 0, borderLeft: side === 'new' ? '1px solid var(--border-subtle)' : 'none',
         transition: 'background var(--dur-fast) var(--ease-soft)' }}>
@@ -156,11 +181,11 @@ export default function ReviewScreen(props) {
         )}
         <span></span>
         <span style={{ textAlign: 'right', paddingRight: 8, color: 'var(--text-faint)',
-          font: 'var(--code-sm)/var(--leading-code) var(--font-mono)', userSelect: 'none' }}>{cell ? cell.n : ''}</span>
+          font: codeFs + 'px/var(--leading-code) var(--font-mono)', userSelect: 'none' }}>{cell ? cell.n : ''}</span>
         <span style={{ color: side === 'old' ? 'var(--diff-del-edge)' : 'var(--diff-add-edge)',
-          userSelect: 'none', fontWeight: 600, font: 'var(--code-sm)/var(--leading-code) var(--font-mono)' }}>{sign}</span>
-        <span style={{ whiteSpace: 'pre', overflow: 'hidden', textOverflow: 'ellipsis', paddingRight: 12,
-          tabSize: 4, font: 'var(--code-sm)/var(--leading-code) var(--font-mono)' }}>
+          userSelect: 'none', fontWeight: 600, font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>{sign}</span>
+        <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', paddingRight: 12,
+          tabSize: 2, font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
           {cell ? highlightGo(cell.c) : ''}
         </span>
       </div>
@@ -209,7 +234,7 @@ export default function ReviewScreen(props) {
         {/* Centered card — with a faint deck of remaining cards peeking to the RIGHT */}
         <div style={{ flex: 1, display: 'flex', alignItems: 'center',
           justifyContent: 'center', padding: '24px var(--canvas-pad)', minHeight: 0 }}>
-          <div style={{ position: 'relative', width: '100%', maxWidth: 760,
+          <div style={{ position: 'relative', width: '100%', maxWidth: 900,
             maxHeight: '100%', display: 'flex' }}>
 
             {/* deck: upcoming cards peeking off the right edge */}
@@ -241,21 +266,13 @@ export default function ReviewScreen(props) {
             {/* Card header */}
             <div style={{ padding: '22px var(--gutter-card) 18px',
               borderBottom: '1px solid var(--border-subtle)' }}>
-              {/* Cluster band — kind badge + cluster title + position in this cluster (⑧). */}
+              {/* Cluster band — cluster title + position in this cluster (⑧). The kind
+                  badge ("Flow/Contract/…") was removed — it read as clutter on the card. */}
               {cluster && (() => {
-                const meta = KIND_META[cluster.kind] || KIND_META.unclustered;
                 const muted = cluster.id === '__unclustered';
                 return (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 12,
                     opacity: muted ? 0.7 : 1 }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 20,
-                      padding: '0 8px', borderRadius: 'var(--radius-pill)',
-                      background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)',
-                      font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
-                      letterSpacing: 'var(--tracking-wide)', color: 'var(--text-tertiary)' }}>
-                      <span style={{ width: 6, height: 6, borderRadius: 999, background: meta.color }} />
-                      {meta.label}
-                    </span>
                     <span style={{ minWidth: 0, font: 'var(--weight-medium) var(--text-sm)/1.2 var(--font-ui)',
                       color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap' }}>{cluster.title}</span>
@@ -282,7 +299,7 @@ export default function ReviewScreen(props) {
                   color: 'var(--text-tertiary)' }}>{card.path}</span>
               </div>
               <div style={{ font: 'var(--text-base)/var(--leading-normal) var(--font-ui)',
-                color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.summary}</div>
+                color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.aiSummary || card.summary}</div>
             </div>
 
             {/* JIT definition (⑨) — an overview panel instead of a diff. ⑧ leaves the
@@ -313,7 +330,25 @@ export default function ReviewScreen(props) {
             <div onMouseLeave={() => { if (!dragging) setHover(null); }}
               style={{ overflowY: 'auto', padding: '8px 0', flex: 1, userSelect: 'none',
               background: 'var(--surface-inset)' }}>
-              {rows.map((row, r) => {
+              {display.map((item) => {
+                if (item.type === 'fold') {
+                  return (
+                    <div key={'fold-' + item.key} onClick={() => setExpanded((s) => new Set(s).add(item.key))}
+                      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 18px', cursor: 'pointer',
+                        color: 'var(--text-faint)',
+                        transition: 'color var(--dur-fast) var(--ease-soft)' }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-secondary)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-faint)'; }}>
+                      <span style={{ flex: 1, height: 1, background: 'var(--border-subtle)' }} />
+                      <span style={{ font: 'var(--text-xs)/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)', whiteSpace: 'nowrap' }}>
+                        ⋯ {item.count} unchanged lines
+                      </span>
+                      <span style={{ flex: 1, height: 1, background: 'var(--border-subtle)' }} />
+                    </div>
+                  );
+                }
+                const row = item.row;
+                const r = item.r;
                 const thread = threadByRow[r];
                 const active = inRange(r);
                 const lo = dragging ? Math.min(dragFrom, dragTo) : -1;

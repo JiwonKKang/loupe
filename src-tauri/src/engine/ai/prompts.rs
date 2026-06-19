@@ -176,39 +176,50 @@ Output only the structured JSON the schema defines.";
 /// the input symbols; a loose token check (`ai::verify::suspicious_identifiers`) is the
 /// safety net behind the "don't assert" rule.
 pub const LABEL_SYSTEM: &str = "\
-You name and summarize each cluster of a code review. You are given `clusters`, each with \
-its `clusterId`, an algorithmic `kind`, and its `changedSymbols` (name + kind + change). \
-For EVERY cluster return:
+You name and summarize each cluster of a code review, AND write a one-sentence summary for \
+each individual changed card. You are given `clusters`, each with its `clusterId`, an \
+algorithmic `kind`, and its `changedSymbols` (each: `cardId` + name + kind + change + an \
+optional `snippet` of the actual added/removed diff lines). For EVERY cluster return:
 
   - `title`: the change in the form [target] + [change action], short (e.g. \"주문 생성 시 \
 쿠폰 할인 적용\", \"결제 실패 이벤트 재시도 정책 변경\"). Never empty.
   - `summary`: 1 to 2 sentences stating the cluster's ONE overall INTENT — what behaviour \
 or capability this group of changes achieves, as a reviewer would describe its purpose. \
 Never empty.
+  - `cardSummaries`: one entry `{cardId, summary}` for EACH `cardId` in this cluster's \
+`changedSymbols`. Each `summary` is ONE Korean sentence describing what THAT specific \
+card's change does — the behaviour/intent of that single symbol's change (what it was \
+made to do), grounded in its `snippet`. This is per-card detail, distinct from the \
+cluster `summary`.
 
-The summary is the cluster's INTENT, not an inventory of its parts. Per-symbol details \
-(which functions changed, how many lines, +N/−M counts) are shown ELSEWHERE on each card — \
-do NOT repeat them here.
+The cluster `summary` is the cluster's INTENT, not an inventory of its parts. Per-symbol \
+detail (which functions changed, what each one does, how many lines, +N/−M counts) belongs \
+in `cardSummaries` and on each card — do NOT repeat per-card detail in the cluster `summary`.
 
-LANGUAGE (한국어 확정): Write `title` and `summary` in KOREAN (자연어 설명은 한국어로). But \
-keep all code identifiers VERBATIM in their original form — symbol names, method names, \
-class/type names, field names, file paths, and API routes stay as written in the code \
-(영문 식별자 원문 유지), never translated or transliterated. Example: \
-\"주문 생성 흐름에 쿠폰 할인을 도입한다\".
+LANGUAGE (한국어 확정): Write `title`, `summary`, and every `cardSummaries[].summary` in \
+KOREAN (자연어 설명은 한국어로). But keep all code identifiers VERBATIM in their original \
+form — symbol names, method names, class/type names, field names, file paths, and API \
+routes stay as written in the code (영문 식별자 원문 유지), never translated or \
+transliterated. Example cluster summary: \"주문 생성 흐름에 쿠폰 할인을 도입한다\". Example \
+card summary: \"createOrder가 주문 생성 시 쿠폰 할인을 계산해 합계에 반영하도록 바뀐다\".
 
 You MAY also suggest cluster merges/splits in `mergeSuggestions` / `splitSuggestions`, but \
 ONLY when clearly warranted — leave them empty otherwise (these are display-only hints, \
 never applied automatically). Reference clusters by `clusterId`.
 
 Hard rules:
-  - The `summary` describes the cluster's single overall intent/behaviour change. Do NOT \
-enumerate individual symbols, do NOT list every changed function/type one by one, and do \
-NOT include line counts or +N/−M / added/removed statistics — those live on the cards.
-  - Mention a symbol name in the summary ONLY when it is genuinely the subject of the \
-intent (e.g. the entrypoint of the flow), and only symbols present in `changedSymbols`. \
-Never invent a symbol, a class, a method, or a side effect.
+  - The cluster `summary` describes the cluster's single overall intent/behaviour change. \
+Do NOT enumerate individual symbols, do NOT list every changed function/type one by one, \
+and do NOT include line counts or +N/−M / added/removed statistics — those live in \
+`cardSummaries` and on the cards.
+  - Each `cardSummaries[].summary` is exactly ONE Korean sentence about that one card's \
+change. State what the symbol does now (its behaviour/intent), not statistics — no line \
+counts, no +N/−M. Base it on the `cardId`'s name/change/`snippet`; if the snippet is \
+absent or unclear, describe the change plainly rather than guessing.
+  - Use ONLY the `cardId` values present in the cluster's `changedSymbols`. Never invent a \
+cardId, a symbol, a class, a method, or a side effect (M4).
   - Do not claim tests exist that are not provided.
-  - Keep the summary to 1–2 sentences; do not pad.
+  - Keep the cluster `summary` to 1–2 sentences and each card summary to 1 sentence; do not pad.
   - When uncertain, describe plainly rather than asserting a cause/effect you can't see.
 
 Output only the structured JSON the schema defines.";
@@ -288,21 +299,30 @@ pub fn cluster_and_order_output_schema() -> Value {
     ])
 }
 
-/// AI3 — labelling output schema (Stage ⑥, M1). title/summary per cluster + display-only
-/// merge/split suggestions:
+/// AI3 — labelling output schema (Stage ⑥, M1). title/summary + per-card summaries per
+/// cluster + display-only merge/split suggestions. `cardSummaries` is an array of fixed-key
+/// `{cardId, summary}` objects (M1-flat — never a dynamic `{cardId: summary}` map):
 ///
 /// ```json
 /// {
-///   "clusters": [ { "clusterId": str, "title": str, "summary": str } ],
+///   "clusters": [ {
+///       "clusterId": str, "title": str, "summary": str,
+///       "cardSummaries": [ { "cardId": str, "summary": str } ]
+///   } ],
 ///   "mergeSuggestions": [ { "clusterIds": [str], "reason": str } ],
 ///   "splitSuggestions": [ { "clusterIds": [str], "reason": str } ]
 /// }
 /// ```
 pub fn label_output_schema() -> Value {
+    let card_summary_item = object_schema(&[
+        ("cardId", string_schema()),
+        ("summary", string_schema()),
+    ]);
     let label_item = object_schema(&[
         ("clusterId", string_schema()),
         ("title", string_schema()),
         ("summary", string_schema()),
+        ("cardSummaries", array_schema(card_summary_item)),
     ]);
     let suggestion_item = object_schema(&[
         ("clusterIds", array_schema(string_schema())),

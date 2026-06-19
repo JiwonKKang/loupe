@@ -93,7 +93,7 @@ export function AnalyzeScreen({ progress }) {
                         </div>
                       </Appear>
                     ))
-                  : <div style={{ padding: '2px 9px', font: 'var(--text-xs)/1.4 var(--font-ui)', color: 'var(--accent)' }}>Reviewing…</div>}
+                  : null}
               </div>
             );
           })}

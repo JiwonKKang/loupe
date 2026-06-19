@@ -89,12 +89,6 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
                     minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}>{g.title}</span>
                 </div>
-                {g.summary && (
-                  <span style={{ font: `var(--text-xs)/1.45 var(--font-ui)`,
-                    color: 'var(--text-faint)', paddingLeft: 14,
-                    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
-                    overflow: 'hidden' }}>{g.summary}</span>
-                )}
               </div>
             )}
             {g.items.map((it) => {

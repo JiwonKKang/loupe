@@ -116,6 +116,13 @@ pub struct ChangedSymbolIn {
     pub change_type: ChangeType,
     /// Short summary reused from the Stage-1 card (B1-safe; never the raw diff).
     pub summary: String,
+    /// **Per-card AI summary evidence (Stage-⑥)**: a *compressed* diff excerpt of this card —
+    /// its added/removed lines, capped at [`SNIPPET_MAX_LINES`] (token defence). Drawn from
+    /// the Stage-1 `ReviewCard.lines` (add/del only). Carried so the labelling call can write a
+    /// one-sentence per-card summary grounded in the actual change. Empty for cards with no
+    /// add/del lines (defensive); skipped from serialization when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub snippet: String,
     /// **Base-AST signal**: when set, this symbol was *renamed* from this old name (its
     /// body/signature matched a symbol deleted from the base). Inline mirror of
     /// `ClusterCardInput::rename_pairs` so the AI sees it on the symbol itself.
@@ -125,6 +132,33 @@ pub struct ChangedSymbolIn {
     /// Inline mirror of `ClusterCardInput::signature_changes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_change: Option<String>,
+}
+
+/// Max diff lines carried in a card's [`ChangedSymbolIn::snippet`] (token defence). The
+/// labelling call needs *enough* change-context to write a one-sentence per-card summary, not
+/// the whole hunk; we keep the first add/del lines up to this cap. Small and fixed so big
+/// cards can't blow the prompt budget.
+pub const SNIPPET_MAX_LINES: usize = 12;
+
+/// Build a compressed diff snippet from a Stage-1 card's lines: keep only add/del lines
+/// (context omitted — the *change* is what matters), prefix each with `+`/`-`, and cap at
+/// [`SNIPPET_MAX_LINES`]. Deterministic (line order preserved). Empty when the card has no
+/// add/del lines (e.g. a pure-context fallback card) so serialization skips it.
+fn snippet_from_lines(lines: &[crate::engine::model::ReviewLine]) -> String {
+    use crate::engine::model::{T_ADD, T_DEL};
+    let mut out: Vec<String> = Vec::with_capacity(SNIPPET_MAX_LINES);
+    for line in lines {
+        let marker = match line.t {
+            T_ADD => '+',
+            T_DEL => '-',
+            _ => continue, // skip context — the change is the add/del lines.
+        };
+        out.push(format!("{marker}{}", line.c));
+        if out.len() >= SNIPPET_MAX_LINES {
+            break;
+        }
+    }
+    out.join("\n")
 }
 
 /// Build the AI input cards from the Stage-② analysis + Stage-1 cards.
@@ -221,6 +255,8 @@ fn build_one(
         let kind = card.map(|c| c.kind).unwrap_or(SymbolKind::Function);
         let change_type = card.map(|c| c.change_type).unwrap_or(ChangeType::Modified);
         let summary = card.map(|c| c.summary.clone()).unwrap_or_default();
+        // Per-card AI-summary evidence: a compressed add/del excerpt of this card (capped).
+        let snippet = card.map(|c| snippet_from_lines(&c.lines)).unwrap_or_default();
         let path = cs
             .map(|c| c.path.clone())
             .or_else(|| card.map(|c| c.path.clone()))
@@ -254,6 +290,7 @@ fn build_one(
             kind,
             change_type,
             summary,
+            snippet,
             renamed_from,
             signature_change,
         });
@@ -480,6 +517,8 @@ pub fn build_file_seed_cards(
                 // Stat summary stays out of the labelling input (see steps.rs); here we
                 // keep the short Stage-1 summary so the clustering call has minimal context.
                 summary: card.summary.clone(),
+                // Per-card AI-summary evidence: compressed add/del excerpt of this file card.
+                snippet: snippet_from_lines(&card.lines),
                 renamed_from: None,
                 signature_change: None,
             }],

@@ -79,6 +79,7 @@ fn sym(id: &str, name: &str) -> ChangedSymbolIn {
         kind: SymbolKind::Function,
         change_type: ChangeType::Modified,
         summary: format!("Updates {name}."),
+        snippet: format!("+// {name}"),
         renamed_from: None,
         signature_change: None,
     }
@@ -457,9 +458,13 @@ fn label_input(cluster_id: &str, syms: &[(&str, &str)]) -> LabelInput {
         changed_symbols: syms
             .iter()
             .map(|(n, _s)| LabelSymbolIn {
+                // Tests key the card by its name (the whitelist uses names too); snippet is a
+                // small synthetic excerpt so the per-card-summary path is exercised.
+                card_id: n.to_string(),
                 name: n.to_string(),
                 kind: SymbolKind::Function,
                 change_type: ChangeType::Modified,
+                snippet: format!("+// {n}"),
             })
             .collect(),
     }
@@ -586,6 +591,15 @@ fn label_output_schema_is_m1_flat() {
     assert_eq!(item["additionalProperties"], json!(false));
     let req = item["required"].as_array().unwrap();
     assert!(req.contains(&json!("title")) && req.contains(&json!("summary")));
+    // cardSummaries is a flattened ARRAY of fixed-key {cardId, summary} objects (M1 — never a
+    // dynamic {cardId: summary} map).
+    assert!(req.contains(&json!("cardSummaries")), "cardSummaries required on each cluster");
+    let cs = &item["properties"]["cardSummaries"];
+    assert_eq!(cs["type"], "array");
+    let cs_item = &cs["items"];
+    assert_eq!(cs_item["additionalProperties"], json!(false));
+    let cs_req = cs_item["required"].as_array().unwrap();
+    assert!(cs_req.contains(&json!("cardId")) && cs_req.contains(&json!("summary")));
     assert_eq!(schema["properties"]["mergeSuggestions"]["type"], "array");
     assert_eq!(schema["properties"]["splitSuggestions"]["type"], "array");
 }

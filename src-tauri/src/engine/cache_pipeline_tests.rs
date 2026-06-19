@@ -106,13 +106,25 @@ impl LlmProvider for CountingProvider {
                 *s
             };
             let cluster_ids = label_cluster_ids(&req.user);
+            // Per-cluster member card ids (for the cardSummaries reply). label_one is a single-
+            // cluster call, but build per-cluster to stay correct for batched calls too.
+            let members = label_member_ids_by_cluster(&req.user);
             let clusters: Vec<Value> = cluster_ids
                 .iter()
                 .map(|cid| {
+                    let card_summaries: Vec<Value> = members
+                        .get(cid)
+                        .map(|ids| {
+                            ids.iter()
+                                .map(|id| json!({ "cardId": id, "summary": format!("{id} 요약") }))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     json!({
                         "clusterId": cid,
                         "title": format!("클러스터 {cid} 변경 #{salt}"),
-                        "summary": "변경 사항을 요약합니다."
+                        "summary": "변경 사항을 요약합니다.",
+                        "cardSummaries": card_summaries
                     })
                 })
                 .collect();
@@ -159,6 +171,28 @@ fn label_cluster_ids(user: &str) -> Vec<String> {
     ids
 }
 
+/// Member card ids per cluster in a labelling request (`clusters[].changedSymbols[].cardId`),
+/// so the mock can emit one `cardSummaries` entry per member — mirroring the real model.
+fn label_member_ids_by_cluster(user: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let v: Value = serde_json::from_str(user).unwrap_or(Value::Null);
+    let mut out = std::collections::HashMap::new();
+    if let Some(Value::Array(clusters)) = v.get("clusters") {
+        for c in clusters {
+            let Some(Value::String(cid)) = c.get("clusterId") else { continue };
+            let mut ids = Vec::new();
+            if let Some(Value::Array(syms)) = c.get("changedSymbols") {
+                for s in syms {
+                    if let Some(Value::String(id)) = s.get("cardId") {
+                        ids.push(id.clone());
+                    }
+                }
+            }
+            out.insert(cid.clone(), ids);
+        }
+    }
+    out
+}
+
 fn sym(id: &str, name: &str, summary: &str) -> ChangedSymbolIn {
     ChangedSymbolIn {
         card_id: id.to_string(),
@@ -166,6 +200,7 @@ fn sym(id: &str, name: &str, summary: &str) -> ChangedSymbolIn {
         kind: SymbolKind::Function,
         change_type: ChangeType::Modified,
         summary: summary.to_string(),
+        snippet: format!("+// {name}: {summary}"),
         renamed_from: None,
         signature_change: None,
     }

@@ -283,6 +283,13 @@ pub struct ClusterLayout {
     pub merge_suggestions: Vec<Suggestion>,
     /// §6.3 display-only split suggestions.
     pub split_suggestions: Vec<Suggestion>,
+    /// Per-card AI one-sentence summaries (Stage-⑥): `card_id -> 한국어 한 문장`. Cached with
+    /// the layout so a cache hit restores them with **zero AI calls**. `fold_layout` copies
+    /// each into the owning `ReviewCard.ai_summary`. A card absent from the map (label failed /
+    /// the AI skipped it) keeps `ai_summary = None` (Optional — no B1 impact). `BTreeMap` for
+    /// a deterministic, byte-stable serialization (§8.1).
+    #[serde(default)]
+    pub card_summaries: std::collections::BTreeMap<String, String>,
 }
 
 /// Stage-③→④→⑤→⑥ entry point: refine the Stage-② analysis into AI cluster cards, then run
@@ -422,6 +429,10 @@ fn fold_layout(review: &mut ReviewData, layout: ClusterLayout, shas: gitdiff::Di
     }
     for card in &mut review.cards {
         card.cluster_id = owner.get(card.id.as_str()).map(|s| s.to_string());
+        // Per-card AI one-sentence summary (Stage-⑥). `None` when the AI didn't produce one
+        // for this card (label failed / skipped) — Optional, so B1 (statistical `summary`
+        // non-empty) is unaffected.
+        card.ai_summary = layout.card_summaries.get(card.id.as_str()).cloned();
     }
 
     review.clusters = layout.clusters;
@@ -592,8 +603,26 @@ pub async fn run_cluster_pipeline(
     let allowed_names = allowed_symbol_names(cards);
     let allowed_ref = &allowed_names;
 
+    // cluster_id -> the set of member card ids the cluster actually owns. The per-card summary
+    // fold whitelists each returned `cardId` against this so a hallucinated id is dropped (M4).
+    let members_by_cluster: std::collections::BTreeMap<&str, std::collections::BTreeSet<&str>> =
+        label_inputs
+            .iter()
+            .map(|inp| {
+                (
+                    inp.cluster_id.as_str(),
+                    inp.changed_symbols.iter().map(|s| s.card_id.as_str()).collect(),
+                )
+            })
+            .collect();
+
     let mut labels: Vec<ai::steps::ClusterLabel> = Vec::with_capacity(label_inputs.len());
     let mut suspicious: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    // Accumulated per-card AI summaries across all clusters (folded into the layout). A later
+    // cluster never overwrites an earlier id (clusters partition the cards, so collisions
+    // shouldn't happen; `entry`-keep makes it deterministic if they ever do).
+    let mut card_summaries: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     // Build the per-cluster review futures eagerly (each borrows `provider`/`allowed_ref`), then
     // drive up to LABEL_CONCURRENCY at once. (Collecting the futures avoids a higher-ranked
@@ -611,6 +640,16 @@ pub async fn run_cluster_pipeline(
         if !bad.is_empty() {
             suspicious.insert(label.cluster_id.clone(), bad);
         }
+        // Fold this cluster's per-card summaries: keep only ids that are real members of the
+        // cluster (M4 whitelist) and non-empty summaries; first writer wins (determinism).
+        if let Some(members) = members_by_cluster.get(label.cluster_id.as_str()) {
+            for cs in &label.card_summaries {
+                let s = cs.summary.trim();
+                if !s.is_empty() && members.contains(cs.card_id.as_str()) {
+                    card_summaries.entry(cs.card_id.clone()).or_insert_with(|| s.to_string());
+                }
+            }
+        }
         labels.push(label);
     }
 
@@ -625,7 +664,7 @@ pub async fn run_cluster_pipeline(
 
     // All clusters reviewed → the final ordering/assembly pass.
     progress.emit(Progress::Final);
-    Ok(assemble_layout(clustering, ordering, label_outcome, cards))
+    Ok(assemble_layout(clustering, ordering, label_outcome, card_summaries, cards))
 }
 
 /// Max clusters reviewed concurrently in Stage-⑥. Each review is its own `claude` CLI call,
@@ -704,11 +743,14 @@ fn build_label_inputs(
                 .iter()
                 .filter_map(|id| by_id.get(id.as_str()))
                 .map(|s| ai::steps::LabelSymbolIn {
+                    // card_id + snippet feed the per-card AI summary (cardSummaries).
+                    card_id: s.card_id.clone(),
                     name: s.name.clone(),
                     kind: s.kind,
                     change_type: s.change_type,
-                    // No statistical `summary` here: per-card detail (line counts) must not
-                    // leak into the cluster summary (Issue A — cluster=intent, card=stats).
+                    snippet: s.snippet.clone(),
+                    // No statistical `summary` here: per-card line counts must not leak into
+                    // the cluster summary (Issue A — cluster=intent, card=intent+snippet).
                 })
                 .collect(),
         })
@@ -730,6 +772,7 @@ fn assemble_layout(
     clustering: ai::steps::ClusterResult,
     ordering: ai::steps::OrderResult,
     labels: ai::steps::LabelOutcome,
+    card_summaries: std::collections::BTreeMap<String, String>,
     cards: &[clustercard::ClusterCardInput],
 ) -> ClusterLayout {
     use std::collections::BTreeMap;
@@ -809,6 +852,7 @@ fn assemble_layout(
         unclustered: ordering.unclustered,
         merge_suggestions: labels.labels.merge_suggestions.iter().map(to_suggestion("merge")).collect(),
         split_suggestions: labels.labels.split_suggestions.iter().map(to_suggestion("split")).collect(),
+        card_summaries,
     }
 }
 

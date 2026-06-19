@@ -113,12 +113,30 @@ pub struct ClusterAndOrderResult {
 }
 
 /// One cluster's AI-produced title + summary (Stage-⑥). B1: never empty after verify.
+///
+/// `card_summaries` is the per-card one-sentence Korean summary the same call emits alongside
+/// the cluster label — one entry per member card. Optional (defaults empty): a missing or
+/// failed label leaves a card's `ai_summary` as `None` (B1 is unaffected — `ai_summary` is the
+/// separate AI-semantic field, not the statistical card `summary`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterLabel {
     pub cluster_id: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    /// Per-card summaries: `{cardId, summary}` for each member card of this cluster.
+    #[serde(default)]
+    pub card_summaries: Vec<CardSummary>,
+}
+
+/// One member card's AI one-sentence summary (Stage-⑥, part of `cardSummaries`).
+/// `cardId` is whitelist-checked against the cluster's members; a hallucinated id is dropped.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardSummary {
+    pub card_id: String,
     #[serde(default)]
     pub summary: String,
 }
@@ -599,13 +617,25 @@ pub struct LabelInput {
 /// Deliberately carries **no statistical `summary`** ("Updates X: +A −B lines"): that
 /// belongs on the card, not the cluster. Feeding it here made the model copy symbol names
 /// and line counts into the cluster `summary` (Issue A — cluster summary leaked per-card
-/// detail). The label call gets only name/kind/change so the summary stays an INTENT.
+/// detail). The label call gets only name/kind/change so the cluster summary stays an INTENT.
+///
+/// **Per-card AI summary**: `card_id` is the stable card id the model echoes back in
+/// `cardSummaries`, and `snippet` is a *compressed* diff excerpt (the card's add/del lines,
+/// capped — `SNIPPET_MAX_LINES`) giving the model the change-context it needs to write a one-
+/// sentence Korean summary of *what that card's change does*. The snippet is per-card evidence
+/// for `cardSummaries` only — the prompt forbids it from leaking into the cluster `summary`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabelSymbolIn {
+    /// Stable card id (echoed back in `cardSummaries[].cardId`).
+    pub card_id: String,
     pub name: String,
     pub kind: crate::engine::model::SymbolKind,
     pub change_type: crate::engine::model::ChangeType,
+    /// Compressed diff excerpt (the card's add/del lines, capped). Evidence for the per-card
+    /// summary only — never serialized when empty (file-level cards may have none).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub snippet: String,
 }
 
 /// Build the labelling user-message JSON: all clusters with their changed symbols.
@@ -629,6 +659,9 @@ fn backfill_missing_labels(mut labels: LabelResult, inputs: &[LabelInput]) -> La
             // B1 fallback 문자열도 한국어 (label 한국어 확정).
             title: "변경 사항".to_string(),
             summary: "이 클러스터의 변경 사항입니다.".to_string(),
+            // A skipped cluster has no per-card summaries; the affected cards' ai_summary
+            // stays None (Optional — no B1 impact, the statistical card summary is intact).
+            card_summaries: Vec::new(),
         });
     }
     labels

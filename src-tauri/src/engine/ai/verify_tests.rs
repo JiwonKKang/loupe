@@ -267,6 +267,7 @@ fn label(id: &str, title: &str, summary: &str) -> ClusterLabel {
         cluster_id: id.to_string(),
         title: title.to_string(),
         summary: summary.to_string(),
+        card_summaries: Vec::new(),
     }
 }
 

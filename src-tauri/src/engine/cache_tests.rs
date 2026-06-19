@@ -14,6 +14,7 @@ fn sym(id: &str, name: &str) -> ChangedSymbolIn {
         kind: SymbolKind::Function,
         change_type: ChangeType::Modified,
         summary: format!("Updates {name}."),
+        snippet: format!("+// {name} changed"),
         renamed_from: None,
         signature_change: None,
     }
@@ -49,6 +50,11 @@ fn layout(cluster_id: &str, ids: &[&str]) -> ClusterLayout {
         unclustered: vec![],
         merge_suggestions: vec![],
         split_suggestions: vec![],
+        // Per-card AI summaries round-trip through the layout cache (Stage-⑥).
+        card_summaries: ids
+            .iter()
+            .map(|id| (id.to_string(), format!("{id} 변경 요약")))
+            .collect(),
     }
 }
 

@@ -62,6 +62,22 @@ fn first_cluster_id(user: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The member card ids of the first cluster in a (single-cluster) label request body —
+/// `clusters[0].changedSymbols[].cardId`. The mock maps each to a per-card summary so the
+/// `cardSummaries` reply mirrors what the real model returns (one per member).
+fn first_cluster_member_ids(user: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(user)
+        .ok()
+        .and_then(|v| v.get("clusters").and_then(|c| c.get(0)).cloned())
+        .and_then(|c| c.get("changedSymbols").and_then(|s| s.as_array()).cloned())
+        .map(|syms| {
+            syms.iter()
+                .filter_map(|s| s.get("cardId").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[async_trait]
 impl LlmProvider for SeqProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -76,8 +92,18 @@ impl LlmProvider for SeqProvider {
                 .get(&id)
                 .cloned()
                 .unwrap_or_else(|| ("변경".to_string(), "요약".to_string()));
+            // One per-card summary per member card id the request carried (mirrors the model).
+            let card_summaries: Vec<Value> = first_cluster_member_ids(&req.user)
+                .into_iter()
+                .map(|cid| json!({ "cardId": cid, "summary": format!("{cid} 카드 변경 요약") }))
+                .collect();
             json!({
-                "clusters": [ { "clusterId": id, "title": title, "summary": summary } ],
+                "clusters": [ {
+                    "clusterId": id,
+                    "title": title,
+                    "summary": summary,
+                    "cardSummaries": card_summaries
+                } ],
                 "mergeSuggestions": [],
                 "splitSuggestions": []
             })
@@ -108,6 +134,7 @@ fn sym(id: &str, name: &str) -> ChangedSymbolIn {
         kind: SymbolKind::Function,
         change_type: ChangeType::Modified,
         summary: format!("Updates {name}."),
+        snippet: format!("+// {name} body"),
         renamed_from: None,
         signature_change: None,
     }
@@ -238,6 +265,7 @@ fn file_seed(seed_id: &str, path: &str, kind: SymbolKind) -> ClusterCardInput {
             kind,
             change_type: ChangeType::Added,
             summary: format!("Adds {path}."),
+            snippet: format!("+// {path}"),
             renamed_from: None,
             signature_change: None,
         }],
@@ -309,4 +337,127 @@ async fn empty_cards_produce_empty_layout_without_calls() {
     // Empty input goes through the small-PR combined path, which short-circuits, then
     // label_step also short-circuits ⇒ zero network calls.
     assert_eq!(provider.call_count(), 0);
+}
+
+// ===========================================================================
+// Stage-⑥ per-card AI summary (cardSummaries → ClusterLayout.card_summaries → ai_summary)
+// ===========================================================================
+
+#[tokio::test]
+async fn per_card_ai_summaries_are_collected_into_the_layout() {
+    // The label call returns one cardSummary per member card; run_cluster_pipeline folds them
+    // all into ClusterLayout.card_summaries (whitelisted to the cluster's real members).
+    let cards = vec![card("seed-1", &[("a", "create"), ("b", "validate"), ("c", "save")])];
+    let provider = SeqProvider::with_labels(
+        vec![json!({
+            "clusters": [ { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" } ],
+            "unclustered": [],
+            "clusterOrder": ["k1"]
+        })],
+        &[("k1", "생성 흐름", "Creates, validates, saves.")],
+    );
+
+    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
+        .await
+        .expect("pipeline succeeds");
+
+    // Every member card got a (non-empty) per-card summary, keyed by card id.
+    assert_eq!(layout.card_summaries.len(), 3, "one summary per member card");
+    for id in ["a", "b", "c"] {
+        let s = layout.card_summaries.get(id).expect("card has a summary");
+        assert!(!s.trim().is_empty(), "ai summary for {id} is non-empty");
+        // The mock maps cardId -> "<id> 카드 변경 요약" (see SeqProvider's label branch).
+        assert!(s.contains(id), "summary for {id} references the card: {s:?}");
+    }
+}
+
+#[tokio::test]
+async fn hallucinated_card_id_in_card_summaries_is_dropped() {
+    // A cardSummaries entry naming a non-member id must NOT leak into the layout (M4): the
+    // fold whitelists each cardId against the cluster's real members.
+    let cards = vec![card("seed-1", &[("a", "create")])];
+    // We need a custom reply with an extra ghost cardSummary, so drive the provider directly.
+    struct GhostProvider;
+    #[async_trait]
+    impl LlmProvider for GhostProvider {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            let is_label = req.system.contains("title") && req.system.contains("summary");
+            let json = if is_label {
+                json!({
+                    "clusters": [ {
+                        "clusterId": "k1", "title": "T", "summary": "S.",
+                        "cardSummaries": [
+                            { "cardId": "a", "summary": "a 카드 요약" },
+                            { "cardId": "ghost", "summary": "유령 카드 요약" }
+                        ]
+                    } ],
+                    "mergeSuggestions": [], "splitSuggestions": []
+                })
+            } else {
+                json!({
+                    "clusters": [ { "clusterId": "k1", "memberCardIds": ["a"], "kind": "flow" } ],
+                    "unclustered": [], "clusterOrder": ["k1"]
+                })
+            };
+            Ok(CompletionResponse { json, stop_reason: "end_turn".into() })
+        }
+        fn model_for(&self, tier: ModelTier) -> &'static str {
+            match tier {
+                ModelTier::Fast => "mock-fast",
+                ModelTier::Quality => "mock-quality",
+            }
+        }
+    }
+
+    let layout = run_cluster_pipeline(&GhostProvider, &cards, &RelationHints::default(), &())
+        .await
+        .expect("pipeline succeeds");
+
+    assert!(layout.card_summaries.contains_key("a"), "real member 'a' kept");
+    assert!(!layout.card_summaries.contains_key("ghost"), "hallucinated 'ghost' dropped");
+    assert_eq!(layout.card_summaries.len(), 1);
+}
+
+#[test]
+fn fold_layout_sets_per_card_ai_summary_from_the_map() {
+    use super::model::{ReviewCard, ReviewLine, T_ADD};
+    use super::{fold_layout, Cluster, DiffShas, ReviewData};
+
+    // A Stage-1 review with two cards; the layout carries a per-card summary for one of them.
+    let line = ReviewLine { n: 1, t: T_ADD, c: "x".into() };
+    let mut review = ReviewData {
+        cards: vec![
+            ReviewCard { id: "a".into(), summary: "Updates a: +1 −0".into(),
+                lines: vec![line.clone()], ..Default::default() },
+            ReviewCard { id: "b".into(), summary: "Updates b: +1 −0".into(),
+                lines: vec![line], ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    let layout = super::ClusterLayout {
+        clusters: vec![Cluster {
+            id: "k1".into(),
+            ordered_card_ids: vec!["a".into(), "b".into()],
+            ..Default::default()
+        }],
+        cluster_order: vec!["k1".into()],
+        ordered_card_ids: vec!["a".into(), "b".into()],
+        unclustered: vec![],
+        merge_suggestions: vec![],
+        split_suggestions: vec![],
+        // Only 'a' has an AI summary; 'b' has none.
+        card_summaries: [("a".to_string(), "a 카드가 무엇을 하는지".to_string())]
+            .into_iter()
+            .collect(),
+    };
+
+    let shas = DiffShas { merge_base_sha: "mb".into(), head_sha: "hd".into() };
+    fold_layout(&mut review, layout, shas);
+
+    let a = review.cards.iter().find(|c| c.id == "a").unwrap();
+    let b = review.cards.iter().find(|c| c.id == "b").unwrap();
+    assert_eq!(a.ai_summary.as_deref(), Some("a 카드가 무엇을 하는지"), "a gets its AI summary");
+    assert_eq!(b.ai_summary, None, "b without a summary stays None (Optional — no B1 impact)");
+    // The statistical card summary (B1) is untouched on both.
+    assert!(!a.summary.is_empty() && !b.summary.is_empty(), "B1: statistical summary intact");
 }
