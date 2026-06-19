@@ -71,3 +71,145 @@ async fn dearday_cache_hit_is_instant() {
         "cache hit should be near-instant, was {second_secs:.3}s"
     );
 }
+
+// ===========================================================================
+// [DEBUG-cl9x] TEMP diagnosis: "everything goes to Unclustered" bug.
+//
+// Reproduces the full analyze_clusters_cached path on dearday and compares it,
+// stage by stage, against the cluster_step(all-cards-at-once) path that the
+// prior dearday_cli_sonnet_full_pipeline test exercised. The hypothesis under
+// test: run_cluster_pipeline_cached runs the AI on ONE seed at a time, so no
+// cross-seed clustering happens and singleton seeds fall to unclustered.
+//
+//   LOUPE_OAUTH_TOKEN=sk-ant-oat01-... \
+//   cargo test -- --ignored --nocapture all_unclustered_repro
+// ===========================================================================
+#[tokio::test]
+#[ignore = "live CliProvider — opt in with `cargo test -- --ignored all_unclustered_repro`"]
+async fn all_unclustered_repro() {
+    use crate::engine::ai::steps::{cluster_step, is_small_pr};
+    use crate::engine::{
+        analyze_relations, build_cluster_cards_with_signals, build_review, run_cluster_pipeline,
+    };
+
+    let Ok(token) = std::env::var("LOUPE_OAUTH_TOKEN") else {
+        eprintln!("LOUPE_OAUTH_TOKEN not set — skipping all_unclustered_repro");
+        return;
+    };
+    let repo = std::env::var("LOUPE_DEARDAY_REPO")
+        .unwrap_or_else(|_| "/Users/jiwon/desktop/projects/dearday".to_string());
+    let base = std::env::var("LOUPE_DEARDAY_BASE").unwrap_or_else(|_| "main".to_string());
+    let target =
+        std::env::var("LOUPE_DEARDAY_TARGET").unwrap_or_else(|_| "feat/kakao-auth".to_string());
+
+    if !std::path::Path::new(&repo).exists() {
+        eprintln!("dearday repo absent — skipping");
+        return;
+    }
+
+    let provider = CliProvider::new(token);
+
+    // Rebuild the exact seed cards the cached pipeline builds.
+    let review = build_review(&repo, &base, &target).expect("build_review");
+    let analysis = analyze_relations(&repo, &base, &target).expect("analyze_relations");
+    let cards = build_cluster_cards_with_signals(
+        &analysis.seeds,
+        &analysis.hints,
+        &analysis.changed,
+        &review.cards,
+        &analysis.base_signals,
+    );
+
+    eprintln!("\n[DEBUG-cl9x] ===== seed cards =====");
+    eprintln!("[DEBUG-cl9x] total seeds (input cards) = {}", cards.len());
+    let total_syms: usize = cards.iter().map(|c| c.changed_symbols.len()).sum();
+    eprintln!("[DEBUG-cl9x] total changed symbols (whitelist) = {total_syms}");
+    eprintln!(
+        "[DEBUG-cl9x] is_small_pr(ALL cards) = {} (SMALL_PR_SYMBOLS=12)",
+        is_small_pr(&cards)
+    );
+    for (i, c) in cards.iter().enumerate() {
+        eprintln!(
+            "[DEBUG-cl9x]   seed[{i}] id={} symbols={} is_small_pr(this seed alone)={}",
+            c.cluster_id,
+            c.changed_symbols.len(),
+            is_small_pr(std::slice::from_ref(c))
+        );
+    }
+
+    // --------- PATH A: per-seed (what analyze_clusters_cached actually does) ---------
+    eprintln!("\n[DEBUG-cl9x] ===== PATH A: run_cluster_pipeline PER SEED =====");
+    let mut a_clusters = 0usize;
+    let mut a_unclustered = 0usize;
+    for (i, card) in cards.iter().enumerate() {
+        let one = std::slice::from_ref(card);
+        // PATH A reproduces the OLD per-seed product behaviour (single-seed AI input). The
+        // pre-fix code restricted hints to the seed's members; the full hints here are a
+        // superset and don't change the single-seed fragmentation this path demonstrates.
+        match run_cluster_pipeline(&provider, one, &analysis.hints).await {
+            Ok(frag) => {
+                eprintln!(
+                    "[DEBUG-cl9x]   seed[{i}] {} -> clusters={} unclustered={} (members={:?})",
+                    card.cluster_id,
+                    frag.clusters.len(),
+                    frag.unclustered.len(),
+                    frag.clusters
+                        .iter()
+                        .map(|c| c.ordered_card_ids.len())
+                        .collect::<Vec<_>>()
+                );
+                a_clusters += frag.clusters.len();
+                a_unclustered += frag.unclustered.len();
+            }
+            Err(e) => eprintln!("[DEBUG-cl9x]   seed[{i}] {} -> ERR {e}", card.cluster_id),
+        }
+    }
+    eprintln!(
+        "[DEBUG-cl9x] PATH A TOTAL: clusters={a_clusters} unclustered={a_unclustered}"
+    );
+
+    // --------- PATH B: cluster_step over ALL cards at once (prior passing test) ------
+    eprintln!("\n[DEBUG-cl9x] ===== PATH B: cluster_step(ALL cards at once) =====");
+    match cluster_step(&provider, &cards).await {
+        Ok(res) => {
+            eprintln!(
+                "[DEBUG-cl9x] PATH B: clusters={} unclustered={}",
+                res.clusters.len(),
+                res.unclustered.len()
+            );
+            for c in &res.clusters {
+                eprintln!(
+                    "[DEBUG-cl9x]   cluster {} kind={:?} members={}",
+                    c.cluster_id,
+                    c.kind,
+                    c.member_card_ids.len()
+                );
+            }
+        }
+        Err(e) => eprintln!("[DEBUG-cl9x] PATH B ERR {e}"),
+    }
+
+    // --------- PATH C: the actual product entry point, end to end --------------------
+    eprintln!("\n[DEBUG-cl9x] ===== PATH C: analyze_clusters_cached (product path) =====");
+    let cache_dir = tempfile::tempdir().unwrap();
+    let cache = Cache::open_in_dir(cache_dir.path()).unwrap();
+    match analyze_clusters_cached(&provider, &cache, &repo, &base, &target).await {
+        Ok(layout) => {
+            eprintln!(
+                "[DEBUG-cl9x] PATH C: clusters={} unclustered={} ordered={}",
+                layout.clusters.len(),
+                layout.unclustered.len(),
+                layout.ordered_card_ids.len()
+            );
+            for c in &layout.clusters {
+                eprintln!(
+                    "[DEBUG-cl9x]   cluster {} '{}' members={:?}",
+                    c.id, c.title, c.ordered_card_ids
+                );
+            }
+            eprintln!("[DEBUG-cl9x]   unclustered ids = {:?}", layout.unclustered);
+        }
+        Err(e) => eprintln!("[DEBUG-cl9x] PATH C ERR {e}"),
+    }
+    eprintln!("\n[DEBUG-cl9x] ===== end =====\n");
+}

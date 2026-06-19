@@ -1,10 +1,16 @@
-//! ⑦ — the **cache-determinism** + **부분 무효화** integration tests (the core of this stage).
+//! ⑦ — the **cache-determinism** + **whole-input invalidation** integration tests (the core
+//! of this stage).
 //!
 //! A `CountingProvider` makes valid AI replies *and counts calls*. The proof of caching is
 //! the call count: a second `run_cluster_pipeline_cached` over the same cards must do
-//! **ZERO** AI calls (every seed + the layout are cached) and return a **byte-identical**
-//! layout — i.e. the cache pins the AI's residual non-determinism (§8.1). Partial
-//! invalidation is proven by changing one seed and asserting only that seed re-calls.
+//! **ZERO** AI calls (the whole-input row + the layout are cached) and return a
+//! **byte-identical** layout — i.e. the cache pins the AI's residual non-determinism (§8.1).
+//!
+//! Clustering is a *global* decision (the model must see all seed cards together to merge
+//! them), so the cache grain is the **whole clustering input**, not a single seed: the
+//! pipeline runs once over all cards and the result is keyed by the set hash of every card's
+//! content hash. Any seed content change invalidates that one row and re-runs the whole
+//! pipeline; an unchanged input (even under a moved head) is a zero-call hit.
 //!
 //! The provider is *intentionally non-deterministic* in its labels (a per-call counter
 //! leaks into the title) so that, without the cache, two runs would differ. With the cache,
@@ -15,7 +21,7 @@ use super::cache::Cache;
 use super::clustercard::{ChangedSymbolIn, ClusterCardInput};
 use super::model::{ChangeType, ClusterKind, SymbolKind};
 use super::relations::RelationHints;
-use super::{run_cluster_pipeline_cached, ClusterLayout};
+use super::ClusterLayout;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -205,12 +211,12 @@ async fn second_run_makes_zero_ai_calls_and_is_byte_identical() {
         card("seed-2", vec![sym("c", "validate", "validates")]),
     ];
 
-    // 1st run: AI is called (2 seeds × {combined + label} = 4 calls).
+    // 1st run: AI is called once over the whole input (small PR ⇒ combined + label = 2 calls).
     let first = run(&provider, &cache, "mb1", &cards).await;
     let calls_after_first = provider.calls();
     assert!(calls_after_first > 0, "first run must hit the provider");
 
-    // 2nd run, SAME cards, SAME merge-base: every seed is a cluster_result hit ⇒ ZERO calls.
+    // 2nd run, SAME cards, SAME merge-base: the whole-input row is a hit ⇒ ZERO calls.
     let second = run(&provider, &cache, "mb1", &cards).await;
     assert_eq!(
         provider.calls(),
@@ -228,10 +234,13 @@ async fn second_run_makes_zero_ai_calls_and_is_byte_identical() {
 }
 
 #[tokio::test]
-async fn two_seeds_keep_distinct_clusters_despite_same_ai_cluster_id() {
-    // The mock (like a real model on per-seed runs) labels every fragment's cluster "k1".
-    // merge_fragments must NOT collapse two seeds into one cluster — every card and a
-    // distinct cluster per seed must survive.
+async fn two_seeds_can_merge_into_one_cluster() {
+    // ★ Regression for the "everything fragments" bug. The cached pipeline must run the AI
+    // over ALL seed cards at once, so the model is free to merge two seeds into a single
+    // cluster. The old per-seed design made this structurally impossible (each seed ran in
+    // isolation ⇒ N seeds ⇒ ≥ N fragments). The mock provider, given both seeds together,
+    // returns ONE cluster holding both ids; the result must therefore be a single cluster
+    // with both cards — not two fragmented ones.
     let cache = Cache::open_in_memory().unwrap();
     let provider = CountingProvider::new();
     let cards = vec![
@@ -245,16 +254,24 @@ async fn two_seeds_keep_distinct_clusters_despite_same_ai_cluster_id() {
     assert_eq!(layout.ordered_card_ids.len(), 2, "both seeds' cards survive");
     assert!(layout.ordered_card_ids.contains(&"a".to_string()));
     assert!(layout.ordered_card_ids.contains(&"b".to_string()));
-    // Two distinct clusters (no id collision swallowing one).
-    assert_eq!(layout.clusters.len(), 2, "two seeds ⇒ two clusters");
-    let ids: std::collections::BTreeSet<&str> =
-        layout.clusters.iter().map(|c| c.id.as_str()).collect();
-    assert_eq!(ids.len(), 2, "cluster ids are unique after merge");
-    assert_eq!(layout.cluster_order.len(), 2, "cluster_order lists both");
+    // ONE cluster — the AI saw both seeds together and merged them. (Pre-fix: 2 fragments.)
+    assert_eq!(layout.clusters.len(), 1, "two seeds merge into one cluster");
+    assert_eq!(
+        layout.clusters[0].ordered_card_ids.len(),
+        2,
+        "the single cluster holds both seeds' cards"
+    );
+    assert_eq!(layout.cluster_order.len(), 1, "cluster_order lists the one cluster");
+    assert!(layout.unclustered.is_empty(), "nothing fell to unclustered");
 }
 
 #[tokio::test]
-async fn partial_invalidation_recalls_only_the_changed_seed() {
+async fn changing_any_seed_reruns_the_whole_pipeline() {
+    // Whole-input grain: clustering is a *global* decision, so any seed content change
+    // invalidates the single whole-input cache row and the pipeline re-runs over all cards
+    // (the price of correctness — see `run_cluster_pipeline_cached`). This replaces the old
+    // per-seed "partial invalidation": that design re-ran the AI on one isolated seed, which
+    // is exactly what made cross-seed merges impossible.
     let cache = Cache::open_in_memory().unwrap();
     let provider = CountingProvider::new();
     let mut cards = vec![
@@ -262,29 +279,35 @@ async fn partial_invalidation_recalls_only_the_changed_seed() {
         card("seed-2", vec![sym("b", "validate", "validates")]),
     ];
 
-    // Warm both seeds.
+    // Warm the whole-input row.
     let _ = run(&provider, &cache, "mb1", &cards).await;
     let after_warm = provider.calls();
+    assert!(after_warm > 0, "first run hits the provider");
 
-    // Change ONLY seed-2's content (a real content change ⇒ new card_hash). seed-1 is
-    // untouched ⇒ its card_hash is unchanged ⇒ cache hit. Even the merge-base/head context
-    // here is the SAME merge-base, simulating "a push touched only one seed".
-    cards[1].changed_symbols[0].summary = "now validates differently".to_string();
-
-    let calls_before = provider.calls();
+    // Re-run with the SAME cards ⇒ whole-input hit ⇒ ZERO new calls.
+    let before_unchanged = provider.calls();
     let _ = run(&provider, &cache, "mb1", &cards).await;
-    let new_calls = provider.calls() - calls_before;
+    assert_eq!(
+        provider.calls(),
+        before_unchanged,
+        "unchanged input ⇒ whole-input cache hit ⇒ no new AI calls"
+    );
 
-    // seed-1 reused (0 calls); only seed-2 re-ran (combined + label = 2 calls).
-    assert_eq!(new_calls, 2, "only the changed seed re-calls the AI");
-    assert!(after_warm > 0);
+    // Change ONE seed's content ⇒ the whole-input set hash changes ⇒ the whole pipeline
+    // re-runs (combined + label = 2 calls for this small PR).
+    cards[1].changed_symbols[0].summary = "now validates differently".to_string();
+    let before_changed = provider.calls();
+    let _ = run(&provider, &cache, "mb1", &cards).await;
+    let new_calls = provider.calls() - before_changed;
+    assert_eq!(new_calls, 2, "a changed seed re-runs the whole pipeline");
 }
 
 #[tokio::test]
 async fn unchanged_content_under_a_new_head_is_a_hit() {
-    // 부분 무효화 across a push: the merge-base is the cluster_result key (NOT head). The same
-    // merge-base + same seed content ⇒ reuse, even though the head moved (no head in this
-    // per-seed key at all). Here we model "same content seen again" — zero new calls.
+    // Head-independent reuse across a push: the whole-input row is keyed by (repo,
+    // merge_base_sha, set_hash) with NO head. The same merge-base + same card contents ⇒
+    // reuse, even though the head moved (the set hash is content-derived). Here we model
+    // "same content seen again" — zero new calls.
     let cache = Cache::open_in_memory().unwrap();
     let provider = CountingProvider::new();
     let cards = vec![card("seed-1", vec![sym("a", "create", "creates")])];
@@ -299,7 +322,7 @@ async fn unchanged_content_under_a_new_head_is_a_hit() {
 
 #[tokio::test]
 async fn different_merge_base_is_a_miss() {
-    // M3: the cluster_result key is (repo, merge_base_sha, card_hash). A different merge-base
+    // M3: the whole-input key is (repo, merge_base_sha, set_hash). A different merge-base
     // ⇒ a miss ⇒ the AI re-runs (the 3-dot base changed, so the diff content may differ).
     let cache = Cache::open_in_memory().unwrap();
     let provider = CountingProvider::new();
