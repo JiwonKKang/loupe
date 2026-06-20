@@ -566,10 +566,16 @@ pub struct LabelOutcome {
 ///  - **M4**: code-identifier tokens in the text not present in the input are reported in
 ///    `LabelOutcome::suspicious` (a re-request hook; not fatal).
 ///
-/// **콜2 = Fast (Haiku) tier** via `CliProvider` + temperature=0 (요약은 0~0.3 가능하나 일단 0
+/// **Fast (Haiku) tier** via `CliProvider` + temperature=0 (요약은 0~0.3 가능하나 일단 0
 /// 통일). 라벨/요약은 클러스터링·정렬 결과를 *묘사*하는 가벼운 작업이라 Haiku로 빠르게 처리한다
 /// (분류·정렬 = 콜1 combined는 Sonnet/Quality 유지). Retries once on a parse failure. Empty
 /// input ⇒ empty labels, no call.
+///
+/// **No longer on the pipeline path.** Stage-⑥ now fans out one [`label_one`] **per cluster, all
+/// concurrent** (the progressive-sidebar streaming variant — 1+N calls), so the orchestrator no
+/// longer makes this single batched call. Retained for the `label_step` unit tests (B1/M4/backfill
+/// /tier coverage); `#[allow(dead_code)]` so the test-only function doesn't warn in the lib build.
+#[allow(dead_code)]
 pub async fn label_step(
     provider: &dyn LlmProvider,
     clusters: &[LabelInput],
@@ -633,14 +639,12 @@ pub async fn label_step(
 /// so a single flaky cluster can't sink the whole pipeline. Returns the verified (non-empty)
 /// label plus this cluster's M4-suspicious tokens (empty when the text is clean).
 ///
-/// **No longer on the hot path, and not currently called anywhere.** Stage-⑥ now runs ONE
-/// batched [`label_step`] for all clusters (the 2-call target), so the orchestrator never fans
-/// this out per cluster. Retained for the single-cluster scoping it provides — a future streaming
-/// variant or a targeted re-label could reuse it — but it has no caller (and no test of its own;
-/// the batched [`label_step`] is what the pipeline tests exercise). `#[allow(dead_code)]` so the
-/// unused function doesn't warn while remaining a public part of the steps API. (Remove it if no
-/// streaming/re-label use materializes.)
-#[allow(dead_code)]
+/// **콜2..N+1 — the hot path.** `run_cluster_pipeline` fans this out **one call per cluster, all
+/// concurrent** (no concurrency cap — cluster counts are small), emitting `Progress::Reviewed`
+/// the moment each finishes so the sidebar fills progressively. The merge/split-suggestion fields
+/// are intentionally empty here (a single-cluster call has no cross-cluster suggestion to make);
+/// that matches the batched [`label_step`]'s output for a one-cluster input. The pipeline is fixed
+/// at **1 + N** AI calls on a cache miss — combined ④⑤ (1) + one `label_one` per cluster (N).
 pub async fn label_one(
     provider: &dyn LlmProvider,
     cluster: &LabelInput,
@@ -654,7 +658,10 @@ pub async fn label_one(
 
     for _attempt in 0..2 {
         let req = CompletionRequest {
-            tier: ModelTier::Quality,
+            // **콜2..N+1 = Haiku(Fast) via CliProvider.** 라벨/요약은 클러스터링·정렬 결과를
+            // *묘사*하는 가벼운 작업이라 Haiku로 빠르게 처리한다 (분류·정렬 = 콜1 combined는
+            // Sonnet/Quality 유지). B1·M4·재현성(temp=0)·retry·backfill 로직은 tier와 무관.
+            tier: ModelTier::Fast,
             system: LABEL_SYSTEM.to_string(),
             user: user.clone(),
             max_tokens: LABEL_MAX_TOKENS,

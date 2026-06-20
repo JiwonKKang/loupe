@@ -315,14 +315,17 @@ pub struct ClusterLayout {
 ///     ([`ai::steps::cluster_and_order_combined`], Sonnet/Quality) for **every** PR size:
 ///     membership + ordering (structure) in a single call, whitelist-verified (hallucination
 ///     reject; omitted ids absorbed; ordering = permutation). No size branch, no ④⑤ split.
-///  6. **콜2** — [`ai::steps::label_step`] (Haiku/Fast) → ONE batched title/summary call for
-///     all clusters + per-card summaries, B1-safe + M4 token-checked (§6.2 / §8.4).
+///  6. **콜2..N+1** — [`ai::steps::label_one`] (Haiku/Fast), **one call per cluster, all
+///     concurrent with no concurrency cap** (cluster counts are small): each emits
+///     `Progress::Reviewed` the moment it finishes so the sidebar fills progressively, with
+///     per-card summaries B1-safe + M4 token-checked (§6.2 / §8.4).
 ///
-/// **AI calls are always exactly 2 on a cache miss**: ④⑤ combined (1) + ⑥ batched label (1).
+/// **AI calls are 1 + N on a cache miss** (N = cluster count): ④⑤ combined (1) + one label per
+/// cluster (N).
 ///
 /// On a combined `Err` (after its one retry) the error propagates so the caller falls back;
 /// this function does not itself implement the layer-heuristic fallback (Stage-⑩). Label
-/// failures are absorbed inside `label_step` (retry + B1 backfill) and never propagate.
+/// failures are absorbed inside `label_one` (retry + B1 fallback) and never propagate.
 pub async fn analyze_clusters(
     provider: &dyn ai::LlmProvider,
     repo_path: &str,
@@ -535,8 +538,8 @@ pub async fn analyze_clusters_cached(
     Ok(layout)
 }
 
-/// Whether a freshly-produced layout is complete enough to **cache**. The batched `label_step`
-/// is B1-safe — a skipped/failed label is backfilled with the B1 fallback label
+/// Whether a freshly-produced layout is complete enough to **cache**. The per-cluster `label_one`
+/// is B1-safe — a failed label is replaced with the B1 fallback label
 /// ([`ai::steps::FALLBACK_TITLE`] / [`ai::steps::FALLBACK_SUMMARY`]). That makes a *transiently
 /// failed* labelling indistinguishable from a real one at the layout level, so without this
 /// guard a one-off label failure (rate-limit, auth blip) would be cached and served forever
@@ -640,13 +643,13 @@ pub async fn run_cluster_pipeline(
     // ④+⑤ = **콜1**: ALWAYS one combined `cluster_and_order_combined` call (Sonnet/Quality) —
     // clustering membership + ordering (the structural work) in a single call, for every PR size.
     // No size branch and no ④⑤ split: the combined call handles large PRs alone now that
-    // `COMBINED_MAX_TOKENS` gives its (compact id-list) output ample room. The pipeline is fixed
-    // at 2 AI calls on a cache miss — ④⑤ combined (1) + ⑥ batched label (2).
+    // `COMBINED_MAX_TOKENS` gives its (compact id-list) output ample room. The pipeline runs
+    // **1 + N AI calls** on a cache miss — ④⑤ combined (1) + one per-cluster label (N).
     //
     // A combined `Err` (transport OR Parse/length) **propagates** via `?`: there is no split
     // fallback here. `analyze_clusters_cached` catches it and runs `build_fallback_layout`
     // (Stage-⑩, the AI-0-call layer heuristic) so the user still gets a layout. (Label failures
-    // are handled *inside* `label_step` via retry + B1 backfill — they never surface here.)
+    // are handled *inside* `label_one` via retry + B1 fallback — they never surface here.)
     //
     // As soon as membership is known we tell the loader which clusters it will review (spinning)
     // so the queue rail can appear before the reviews come back. `Progress::Clusters` is emitted
@@ -656,14 +659,15 @@ pub async fn run_cluster_pipeline(
         clusters: progress_clusters(&clustering, cards),
     });
 
-    // ⑥: ONE batched label call for ALL clusters (the 2-call target — never per-cluster N
-    // calls). The single `label_step` returns every cluster's title/summary + per-card
-    // summaries; we then fold them and stream `Progress::Reviewed` per cluster in flow order so
-    // the loader's event contract is unchanged (the rail fills at once rather than in waves).
+    // ⑥ = **콜2..N+1**: ONE `label_one` (Haiku/Fast) call **per cluster**, all fired **concurrently
+    // with no concurrency cap** — cluster counts are small (a PR is a handful of clusters), so we
+    // run them all at once and let whichever finishes first reveal itself in the sidebar. The total
+    // is **1 + N** AI calls on a cache miss: combined ④⑤ (1) + one label per cluster (N).
+    //
+    // `label_one` never returns an `Err` (it retries once, then synthesizes the B1 fallback label),
+    // so a single flaky cluster can't sink the pipeline and no label failure surfaces here.
     let label_inputs = build_label_inputs(&clustering, cards);
     let allowed_names = allowed_symbol_names(cards);
-
-    let label_outcome = steps::label_step(provider, &label_inputs, &allowed_names).await?;
 
     // cluster_id -> the set of member card ids the cluster actually owns. The per-card summary
     // fold whitelists each returned `cardId` against this so a hallucinated id is dropped (M4).
@@ -677,13 +681,48 @@ pub async fn run_cluster_pipeline(
                 )
             })
             .collect();
-    // label result keyed by cluster id (for the Reviewed loop's chapter title + summary fold).
-    let label_by_id: std::collections::BTreeMap<&str, &ai::steps::ClusterLabel> = label_outcome
-        .labels
-        .clusters
+
+    // Fan out one `label_one` future per cluster. Each future returns the cluster id (so we can
+    // re-key the result independent of completion order) plus its `(ClusterLabel, suspicious)`.
+    // (`allowed_names` is borrowed once here; the explicit `let` gives the borrow a concrete
+    // lifetime so the per-future async block borrows it without HRTB inference trouble.)
+    let allowed_names_ref = &allowed_names;
+    let label_futs: Vec<_> = label_inputs
         .iter()
-        .map(|l| (l.cluster_id.as_str(), l))
+        .map(|inp| async move {
+            let (label, suspicious) = steps::label_one(provider, inp, allowed_names_ref).await;
+            (inp.cluster_id.clone(), label, suspicious)
+        })
         .collect();
+
+    // **무제한 동시성**: `buffer_unordered`'s degree = the label count (≥1) — there is no cap
+    // constant, because the cluster count is small enough to run every label call at once. As each
+    // call completes (in nondeterministic order — *cosmetic* for the Reviewed stream) we emit
+    // `Progress::Reviewed` so the sidebar fills progressively, and stash the label/summaries into
+    // a **cluster-id-keyed map**. The final assembly reads that map in **flow order**
+    // (`clustering.clusters`), NOT completion order, so the layout stays byte-identical regardless
+    // of which label call returned first (★ determinism — pinned by the byte-identical cache test).
+    let label_futs_len = label_futs.len();
+    let mut label_by_id: std::collections::BTreeMap<String, ai::steps::ClusterLabel> =
+        std::collections::BTreeMap::new();
+    let mut suspicious_by_id: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    {
+        use futures_util::stream::{self, StreamExt};
+        let mut stream = stream::iter(label_futs).buffer_unordered(label_futs_len.max(1));
+        while let Some((cluster_id, label, suspicious)) = stream.next().await {
+            // Reveal this cluster in the sidebar the moment its review finishes (completion order;
+            // the title is the cluster's real AI chapter). Cosmetic — order is allowed to vary.
+            progress.emit(Progress::Reviewed {
+                id: cluster_id.clone(),
+                chapter: label.title.clone(),
+            });
+            if !suspicious.is_empty() {
+                suspicious_by_id.insert(cluster_id.clone(), suspicious);
+            }
+            label_by_id.insert(cluster_id, label);
+        }
+    }
 
     // Accumulated per-card AI summaries across all clusters (folded into the layout). A later
     // cluster never overwrites an earlier id (clusters partition the cards, so collisions
@@ -691,18 +730,13 @@ pub async fn run_cluster_pipeline(
     let mut card_summaries: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
 
-    // Stream a `Reviewed` per cluster in flow order (the labelling is already done; this is the
-    // same event the per-cluster fan-out used to emit, so the loader contract is preserved). We
-    // walk `clustering.clusters` for a deterministic, structure-defined order. Each cluster's
-    // per-card summaries are folded here under the M4 member whitelist.
+    // ★ Determinism: fold the per-card summaries in **flow order** (`clustering.clusters`), reading
+    // the completion-order-independent map. The Reviewed *emit* above was completion-ordered
+    // (cosmetic), but every byte that lands in the layout is decided here in structure order.
     for c in &clustering.clusters {
         let Some(label) = label_by_id.get(c.cluster_id.as_str()) else {
-            continue; // backfill guarantees a label for every input cluster; defensive.
+            continue; // `label_one`'s B1 fallback guarantees a label per cluster; defensive.
         };
-        progress.emit(Progress::Reviewed {
-            id: label.cluster_id.clone(),
-            chapter: label.title.clone(),
-        });
         // Fold this cluster's per-card summaries: keep only ids that are real members of the
         // cluster (M4 whitelist) and non-empty summaries; first writer wins (determinism).
         if let Some(members) = members_by_cluster.get(label.cluster_id.as_str()) {
@@ -714,6 +748,23 @@ pub async fn run_cluster_pipeline(
             }
         }
     }
+
+    // Reassemble a batched-shaped `LabelOutcome` from the per-cluster results so `assemble_layout`
+    // is unchanged. The labels are listed in **flow order** (`clustering.clusters`) — completion
+    // order never reaches the layout. Per-cluster `label_one` makes no cross-cluster merge/split
+    // suggestion (parity with a one-cluster `label_step`), so those vectors are empty.
+    let label_outcome = ai::steps::LabelOutcome {
+        labels: ai::steps::LabelResult {
+            clusters: clustering
+                .clusters
+                .iter()
+                .filter_map(|c| label_by_id.remove(c.cluster_id.as_str()))
+                .collect(),
+            merge_suggestions: Vec::new(),
+            split_suggestions: Vec::new(),
+        },
+        suspicious: suspicious_by_id,
+    };
 
     // All clusters reviewed → the final ordering/assembly pass.
     progress.emit(Progress::Final);

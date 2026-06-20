@@ -1,12 +1,13 @@
 //! Stage-④→⑤→⑥ orchestration tests for [`super::run_cluster_pipeline`].
 //!
 //! A sequenced mock provider feeds canned AI replies so the whole pipeline (combined ④⑤ →
-//! batched ⑥) is exercised without a network or git. The AI is **always exactly 2 calls** on a
-//! cache miss, for *every* PR size: ④⑤ combined (콜1, Quality/Sonnet) + ⑥ batched label (콜2,
-//! Fast/Haiku). There is no ④⑤ split and no size branch anymore. Assertions cover:
-//!  - **small / medium / large PRs all take the combined path** ⇒ combined(1) + batched label(1)
-//!    = 2 calls (the call count is independent of symbol count),
-//!  - the label (콜2) call goes out on the **Fast** tier (Haiku) while the combined (콜1) call
+//! per-cluster ⑥) is exercised without a network or git. The AI is **1 + N calls** on a cache
+//! miss (N = cluster count): ④⑤ combined (콜1, Quality/Sonnet) + one per-cluster label (콜2..N+1,
+//! Fast/Haiku, all concurrent — no concurrency cap). There is no ④⑤ split and no size branch
+//! anymore. Assertions cover:
+//!  - **small / medium / large PRs all take the combined path** ⇒ combined(1) + per-cluster
+//!    label(N) = 1+N calls (the symbol count doesn't add calls; the *cluster* count is N),
+//!  - the label (콜2..N+1) calls go out on the **Fast** tier (Haiku) while the combined (콜1) call
 //!    goes out on **Quality** (Sonnet),
 //!  - a combined `Err` **propagates** out of the pipeline (so `analyze_clusters_cached`'s ⑩
 //!    `build_fallback_layout` can take over) — no split fallback,
@@ -213,8 +214,9 @@ async fn small_pr_takes_combined_branch_then_labels() {
         .await
         .expect("pipeline succeeds");
 
-    assert_eq!(provider.call_count(), 2, "small PR ⇒ combined(1) + batched label(1) = 2 calls");
-    // 콜1 = combined on Quality(Sonnet), 콜2 = label on Fast(Haiku). Exactly two calls, that order.
+    // 1 cluster ⇒ combined(1) + per-cluster label(1) = 1+N = 2 calls.
+    assert_eq!(provider.call_count(), 2, "small PR (1 cluster) ⇒ combined(1) + label(1) = 2 calls");
+    // 콜1 = combined on Quality(Sonnet), 콜2 = label on Fast(Haiku). One cluster ⇒ exactly that order.
     assert_eq!(
         provider.tiers(),
         vec![ModelTier::Quality, ModelTier::Fast],
@@ -240,8 +242,8 @@ async fn small_pr_takes_combined_branch_then_labels() {
 #[tokio::test]
 async fn medium_pr_still_combined_and_orders_across_clusters() {
     // 13 symbols — a "medium" PR. The pipeline always takes the combined ④⑤ path regardless of
-    // size, so this is combined(1) + batched label(1) = 2 calls (never a 3-call split — that path
-    // is gone). The combined reply carries two clusters with already-ordered members +
+    // size; labelling is now **per-cluster** (1+N), so with TWO clusters this is combined(1) +
+    // label(2) = 3 calls. The combined reply carries two clusters with already-ordered members +
     // clusterOrder, exercising cross-cluster order through the single combined call.
     let names: Vec<(&str, &str)> = vec![
         ("a", "handleLogin"), ("b", "validateToken"), ("c", "saveSession"),
@@ -276,13 +278,18 @@ async fn medium_pr_still_combined_and_orders_across_clusters() {
 
     assert_eq!(
         provider.call_count(),
-        2,
-        "medium PR ⇒ combined(1) + batched label(1) = 2 calls (size doesn't add calls)"
+        3,
+        "medium PR (2 clusters) ⇒ combined(1) + per-cluster label(2) = 1+N = 3 calls"
     );
+    // 콜1 = combined on Quality (awaited before the label fan-out, so deterministically first);
+    // 콜2..N+1 = one label per cluster, all on Fast (concurrent — only their tier, not order, is
+    // asserted). The whole label fan-out is Fast/Haiku.
+    let tiers = provider.tiers();
+    assert_eq!(tiers[0], ModelTier::Quality, "콜1 combined on Quality (runs before the label fan-out)");
     assert_eq!(
-        provider.tiers(),
-        vec![ModelTier::Quality, ModelTier::Fast],
-        "콜1 combined on Quality, 콜2 label on Fast — even for a medium PR"
+        provider.label_tiers(),
+        vec![ModelTier::Fast, ModelTier::Fast],
+        "both per-cluster labels (⑥) go out on the Fast/Haiku tier"
     );
     assert_eq!(layout.cluster_order, vec!["k1".to_string(), "k2".to_string()]);
     // k2's members came back reordered as h,g (combined memberCardIds are already ordered).
@@ -304,9 +311,10 @@ async fn medium_pr_still_combined_and_orders_across_clusters() {
 #[tokio::test]
 async fn large_pr_still_takes_combined_path_in_two_calls() {
     // 49 symbols — a large PR. There is NO split anymore: the single combined ④⑤ call handles it
-    // (its output cap was raised to hold a big PR's id-list structure), so it is still
-    // combined(1) + batched label(1) = 2 calls, NOT a 3-call split. ONE combined reply carries
-    // all 49 ids (in id order so verify_order's permutation check passes) + clusterOrder.
+    // (its output cap was raised to hold a big PR's id-list structure). The 49 symbols form ONE
+    // cluster (k1), so labelling is a single per-cluster call ⇒ combined(1) + label(1) = 1+N = 2
+    // calls. ONE combined reply carries all 49 ids (in id order so verify_order's permutation
+    // check passes) + clusterOrder.
     let names: Vec<(String, String)> = (0..49)
         .map(|i| (format!("c{i}"), format!("sym{i}")))
         .collect();
@@ -333,7 +341,7 @@ async fn large_pr_still_takes_combined_path_in_two_calls() {
     assert_eq!(
         provider.call_count(),
         2,
-        "large PR ⇒ combined(1) + batched label(1) = 2 calls (no split, regardless of size)"
+        "large PR (1 cluster) ⇒ combined(1) + label(1) = 1+N = 2 calls (no split, regardless of size)"
     );
     assert_eq!(
         provider.tiers(),
@@ -418,7 +426,7 @@ async fn file_seeds_are_clustered_into_an_infra_topic_not_unclustered() {
         file_seed("file-seed-2", cargo, SymbolKind::Config),
         file_seed("file-seed-3", caddy, SymbolKind::Config),
     ];
-    // 4 symbols total ≤ SMALL_PR_SYMBOLS ⇒ combined branch (1 call) + label (1 call).
+    // 4 symbols total; combined ④⑤ (1 call) + one per-cluster label per cluster (k1 + k2 = 2).
     let ci_id = format!("{ci}::__file");
     let cargo_id = format!("{cargo}::__file");
     let caddy_id = format!("{caddy}::__file");

@@ -567,6 +567,48 @@ async fn label_step_empty_input_makes_no_call() {
     assert_eq!(provider.call_count(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// label_one — the per-cluster streaming variant (콜2..N+1, the hot path)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn label_one_labels_a_single_cluster_on_fast_tier_temp0() {
+    // The per-cluster label call (the progressive-sidebar streaming variant) labels exactly one
+    // cluster on the Fast/Haiku tier — mirroring the batched `label_step` tier but scoped to one.
+    let input = label_input("c1", &[("createOrder", "creates")]);
+    let provider = SeqProvider::one(json!({
+        "clusters": [ { "clusterId": "c1", "title": "주문 생성", "summary": "Creates an order." } ],
+        "mergeSuggestions": [],
+        "splitSuggestions": []
+    }));
+    let (label, suspicious) = label_one(&provider, &input, &wl(&["createOrder"])).await;
+    assert_eq!(label.cluster_id, "c1");
+    assert_eq!(label.title, "주문 생성");
+    assert!(suspicious.is_empty(), "clean text ⇒ no suspicious tokens");
+    assert_eq!(provider.call_count(), 1, "one cluster ⇒ one call");
+    let req = provider.last.lock().unwrap().clone().unwrap();
+    // 콜2..N+1 = labelling on the Fast tier (Haiku): 라벨/요약은 가벼운 묘사라 Haiku로 빠르게.
+    assert_eq!(req.tier, ModelTier::Fast, "label_one (⑥) uses Haiku (Fast) via CliProvider");
+    assert_eq!(req.temperature, 0.0);
+    assert_eq!(req.system, crate::engine::ai::prompts::LABEL_SYSTEM);
+}
+
+#[tokio::test]
+async fn label_one_falls_back_to_b1_label_when_the_call_fails() {
+    // B1: a per-cluster call that never validates (both attempts fail) must NOT sink the
+    // pipeline — `label_one` synthesizes the centralized B1 fallback title/summary instead.
+    let input = label_input("c1", &[("createOrder", "creates")]);
+    let provider = SeqProvider::new(vec![
+        Err(LlmError::Overloaded),
+        Err(LlmError::Overloaded),
+    ]);
+    let (label, _suspicious) = label_one(&provider, &input, &wl(&["createOrder"])).await;
+    assert_eq!(label.cluster_id, "c1");
+    assert_eq!(label.title, super::FALLBACK_TITLE, "B1 fallback title on a failed label");
+    assert_eq!(label.summary, super::FALLBACK_SUMMARY, "B1 fallback summary on a failed label");
+    assert_eq!(provider.call_count(), 2, "retries once, then falls back");
+}
+
 // ===========================================================================
 // M1 schemas for stages ⑤/⑥
 // ===========================================================================
