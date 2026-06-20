@@ -45,10 +45,9 @@ body { font-family: var(--font-ui); color: var(--text-primary);
 @keyframes loupe-spin {
   to { transform: rotate(360deg); }
 }
-/* Per-side code scrollers in the split diff hide their own scrollbars; a single
-   synced .loupe-hbar at the bottom of the diff drives the horizontal scroll. */
-.loupe-codescroll { scrollbar-width: none; -ms-overflow-style: none; }
-.loupe-codescroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+/* Code lines in the split diff clip (overflow:hidden) and translate by a CSS
+   variable; a per-side .loupe-hbar at the bottom of the diff is the only
+   horizontal control and its scrollLeft drives that variable. */
 .loupe-hbar { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
 .loupe-hbar::-webkit-scrollbar { height: 8px; }
 .loupe-hbar::-webkit-scrollbar-track { background: transparent; }

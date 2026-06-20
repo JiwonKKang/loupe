@@ -209,30 +209,31 @@ export default function ReviewScreen(props) {
   // short changes get a compact card and long ones widen toward the cap.
   const cardW = Math.max(560, Math.min(1140, (62 + codeContentW) * 2 + 6));
   const diffRef = React.useRef(null);
-  // Remember each side's horizontal scroll position so rows that mount during
-  // windowing inherit it (a fresh <div data-codescroll> starts at scrollLeft 0).
-  const hScrollRef = React.useRef({ old: 0, new: 0 });
-  const syncScroll = (e) => {
-    const t = e.target;
-    if (!t || !t.getAttribute) return;
-    const side = t.getAttribute('data-codescroll');
-    if (!side || !diffRef.current) return;
-    const sl = t.scrollLeft;
-    hScrollRef.current[side] = sl;
-    // Only the currently-windowed (visible) rows are in the DOM, so this is cheap.
-    diffRef.current.querySelectorAll('[data-codescroll="' + side + '"]').forEach((el) => {
-      if (el !== t && Math.abs(el.scrollLeft - sl) > 0.5) el.scrollLeft = sl;
-    });
-  };
+  // The two bottom horizontal scrollbars (one per side) are the ONLY horizontal
+  // controls. Their onScroll writes a CSS variable (--hs-old / --hs-new) on the
+  // diff container; every code line of that side reads the variable via a CSS
+  // translateX, so a horizontal scroll is O(1) (one setProperty) and rows that
+  // mount during windowing inherit the offset automatically (no JS per row).
+  const hbarOldRef = React.useRef(null);
+  const hbarNewRef = React.useRef(null);
+  // Wheel-driven horizontal scroll: route a horizontal wheel onto the bar of the
+  // side under the cursor; its onScroll then updates the CSS variable for us.
+  // NOTE: this MUST be a native non-passive listener. React delegates `onWheel`
+  // as a PASSIVE root listener, so a React onWheel handler cannot preventDefault
+  // (it no-ops + warns, and the browser keeps the native gesture — e.g. macOS
+  // swipe-back). We bind it ourselves with { passive: false } so preventDefault
+  // actually consumes the horizontal gesture.
 
   // ---- Vertical windowing (virtualization) for the split diff ----
-  // Estimated row height from the code line-height; recomputed when font changes.
+  // Default row height from the code line-height; used only for not-yet-measured
+  // rows. Actual heights are measured per row (see rowH/offsets below) so threads,
+  // collapsed badges and fold dividers contribute their real height with no drift.
   const RH = Math.max(1, Math.round(codeFs * 1.72));
   const [scrollTop, setScrollTop] = React.useState(0);
   const [viewportH, setViewportH] = React.useState(800);
   const scrollRaf = React.useRef(0);
-  // rAF-throttled vertical scroll: only react to the OUTER container's vertical
-  // scroll (horizontal code scrollers / hbar are handled by syncScroll above).
+  // rAF-throttled vertical scroll: only the OUTER container scrolls vertically
+  // (horizontal scrolling is the bottom hbars writing a CSS variable).
   const onDiffScroll = (e) => {
     if (e.currentTarget !== diffRef.current) return;
     const top = e.currentTarget.scrollTop;
@@ -256,29 +257,84 @@ export default function ReviewScreen(props) {
     // the diff container on every card change, so diffRef points at a fresh node
     // each time — we must re-observe it (and re-measure clientHeight) per card.
   }, [card.id, isDefinition]);
-  // Reset scroll when switching cards (the diff container is reused across cards).
+  // Native non-passive wheel listener (see note on hbarOldRef above): horizontal
+  // wheel → push the hovered side's bottom hbar, whose onScroll sets the CSS var.
+  // Re-bind per card (the diff node is fresh after each key={card.id} remount).
   React.useEffect(() => {
+    const el = diffRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // vertical → container scrolls
+      const half = e.target.closest && e.target.closest('[data-side]');
+      const side = half && half.getAttribute('data-side');
+      const bar = side === 'new' ? hbarNewRef.current : hbarOldRef.current;
+      if (bar) { bar.scrollLeft += e.deltaX; e.preventDefault(); }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [card.id, isDefinition]);
+  // ---- Measured variable-height windowing ----
+  // Each displayed item's real pixel height, indexed by its position in `display`.
+  // Not-yet-measured items fall back to RH. A measuring ref on each item's top
+  // element reports offsetHeight; we store it and bump measureTick to recompute
+  // offsets. Reset per card so a reused container never carries stale heights.
+  const rowH = React.useRef([]);
+  const [measureTick, setMeasureTick] = React.useState(0);
+
+  // Reset scroll + measured heights when switching cards (container is reused).
+  React.useEffect(() => {
+    rowH.current = [];
     if (diffRef.current) diffRef.current.scrollTop = 0;
     setScrollTop(0);
   }, [card.id]);
 
   const N = display.length;
-  const OVER = 14; // overscan rows above/below the viewport
-  const startIdx = Math.max(0, Math.floor(scrollTop / RH) - OVER);
-  const endIdx = Math.min(N, Math.ceil((scrollTop + viewportH) / RH) + OVER);
 
-  // When the windowed slice changes (or font changes), give the freshly-mounted
-  // rows the current horizontal scroll position so columns stay aligned.
-  React.useLayoutEffect(() => {
-    if (!diffRef.current) return;
-    ['old', 'new'].forEach((side) => {
-      const x = hScrollRef.current[side];
-      if (!x) return;
-      diffRef.current.querySelectorAll('[data-codescroll="' + side + '"]').forEach((el) => {
-        if (Math.abs(el.scrollLeft - x) > 0.5) el.scrollLeft = x;
-      });
-    });
-  }, [startIdx, endIdx, codeFs]);
+  // Prefix-sum offsets of every item top (offsets[i]) and the total height.
+  // (totalH, not `total` — that prop is the card count.) Recomputed when the
+  // item list, font (RH), or a fresh measurement changes.
+  const { offsets, totalH } = React.useMemo(() => {
+    const o = new Array(N + 1);
+    o[0] = 0;
+    for (let i = 0; i < N; i++) o[i + 1] = o[i] + (rowH.current[i] || RH);
+    return { offsets: o, totalH: o[N] };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [N, RH, measureTick, display]);
+
+  // Binary search: first index whose BOTTOM edge passes `y` (offsets[i+1] > y).
+  const firstBelow = (y) => {
+    let lo = 0, hi = N;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (offsets[m + 1] > y) hi = m; else lo = m + 1; }
+    return lo;
+  };
+  // Binary search: first index whose TOP edge is at/after `y` (offsets[i] >= y).
+  const firstAtOrAfter = (y) => {
+    let lo = 0, hi = N;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (offsets[m] >= y) hi = m; else lo = m + 1; }
+    return lo;
+  };
+
+  const OVERPX = 600; // overscan in px above/below the viewport
+  const startIdx = N === 0 ? 0 : firstBelow(scrollTop - OVERPX);
+  // At least one item past startIdx so a single tall row (e.g. an open thread)
+  // taller than the viewport still renders instead of collapsing to an empty slice.
+  const endIdx = N === 0 ? 0 : Math.max(startIdx + 1, firstAtOrAfter(scrollTop + viewportH + OVERPX));
+  const topPad = offsets[startIdx] || 0;
+  const bottomPad = Math.max(0, totalH - (offsets[endIdx] || totalH));
+
+  // Measuring ref factory: stores the item's offsetHeight at its global index and
+  // bumps measureTick only when the height actually changed (> 0.5px). This guard
+  // is what makes measurement converge instead of looping: once a row's stored
+  // height matches its rendered height (within 0.5px) the callback is a no-op, so
+  // it triggers no further render — measurement reaches a fixed point.
+  const measure = (gi) => (el) => {
+    if (!el) return;
+    const h = el.offsetHeight;
+    if (Math.abs((rowH.current[gi] || 0) - h) > 0.5) {
+      rowH.current[gi] = h;
+      setMeasureTick((t) => t + 1);
+    }
+  };
 
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -367,10 +423,11 @@ export default function ReviewScreen(props) {
         <span style={{ color: side === 'old' ? 'var(--diff-del-edge)' : 'var(--diff-add-edge)',
           userSelect: 'none', fontWeight: 600, font: codeFs + 'px/var(--leading-code) var(--font-mono)',
           boxShadow: 'inset -1px 0 0 var(--border-subtle)' }}>{sign}</span>
-        <div className="loupe-codescroll" data-codescroll={side} style={{ overflowX: 'auto', overflowY: 'hidden', minWidth: 0,
+        <div data-side={side} style={{ overflow: 'hidden', minWidth: 0,
           font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
           <span style={{ display: 'inline-block', minWidth: codeContentW, whiteSpace: 'pre',
-            paddingLeft: 11, paddingRight: 16, tabSize: 2 }}>
+            paddingLeft: 11, paddingRight: 16, tabSize: 2,
+            transform: 'translateX(calc(var(--hs-' + side + ') * -1))' }}>
             {cell ? hl(cell.c) : ''}
           </span>
         </div>
@@ -491,10 +548,11 @@ export default function ReviewScreen(props) {
             <span ref={charRef} aria-hidden="true" style={{ position: 'absolute', visibility: 'hidden',
               pointerEvents: 'none', whiteSpace: 'pre', font: codeFs + 'px/1 var(--font-mono)' }}>{'0'.repeat(50)}</span>
 
-            {/* Split diff — each side (BEFORE / AFTER) scrolls left/right on its own */}
-            <div ref={diffRef} onScrollCapture={syncScroll} onScroll={onDiffScroll} onMouseLeave={() => { if (!dragging) setHover(null); }}
+            {/* Split diff — each side (BEFORE / AFTER) scrolls left/right via the
+                bottom hbar, which writes --hs-old / --hs-new (read by each line). */}
+            <div ref={diffRef} onScroll={onDiffScroll} onMouseLeave={() => { if (!dragging) setHover(null); }}
               style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, userSelect: 'none',
-              background: 'var(--surface-inset)' }}>
+              background: 'var(--surface-inset)', '--hs-old': '0px', '--hs-new': '0px' }}>
 
               {/* sticky column headers */}
               <div style={{ display: 'flex', position: 'sticky', top: 0, zIndex: 2,
@@ -509,11 +567,12 @@ export default function ReviewScreen(props) {
               </div>
 
               <div style={{ padding: '8px 0' }}>
-              <div style={{ height: startIdx * RH }} />
-              {display.slice(startIdx, endIdx).map((item) => {
+              <div style={{ height: topPad }} />
+              {display.slice(startIdx, endIdx).map((item, li) => {
+                const gi = startIdx + li; // global index into `display` (for measurement)
                 if (item.type === 'fold') {
                   return (
-                    <div key={'fold-' + item.key} onClick={() => setExpanded((s) => new Set(s).add(item.key))}
+                    <div key={'fold-' + item.key} ref={measure(gi)} onClick={() => setExpanded((s) => new Set(s).add(item.key))}
                       style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 18px', cursor: 'pointer',
                         color: 'var(--text-faint)',
                         transition: 'color var(--dur-fast) var(--ease-soft)' }}
@@ -535,8 +594,12 @@ export default function ReviewScreen(props) {
                 const hi = dragging ? Math.max(dragFrom, dragTo) : -1;
                 const isFirst = active && r === lo;
                 const isLast = active && r === hi;
+                // A row's measured height must include any open/collapsed thread that
+                // renders directly beneath it, so the measuring ref wraps both. The
+                // wrapper is a plain block (no flex/grid/height) — it does not alter
+                // layout, it only gives offsetHeight something to read.
                 return (
-                  <React.Fragment key={r}>
+                  <div key={r} ref={measure(gi)}>
                     <div data-line={r} style={{ display: 'flex', minWidth: 0 }}>
                       <Half cell={row.left} kind={row.kind} side="old" r={r}
                         active={active} isFirst={isFirst} isLast={isLast} thread={thread} />
@@ -566,24 +629,30 @@ export default function ReviewScreen(props) {
                           : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
                       </div>
                     )}
-                  </React.Fragment>
+                  </div>
                 );
               })}
-              <div style={{ height: (N - endIdx) * RH }} />
+              <div style={{ height: bottomPad }} />
               </div>
 
-              {/* synced horizontal scrollbars — one per side, pinned at the bottom */}
+              {/* horizontal scrollbars — one per side, pinned at the bottom. These
+                  are the ONLY horizontal controls: each onScroll writes its side's
+                  CSS variable, which every code line of that side translates by. */}
               <div style={{ display: 'flex', position: 'sticky', bottom: 0, zIndex: 2,
                 background: 'var(--surface-inset)' }}>
                 <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex' }}>
                   <div style={{ width: GUTTER, flex: 'none' }} />
-                  <div className="loupe-hbar" data-codescroll="old" style={{ flex: '1 1 0', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
+                  <div className="loupe-hbar" ref={hbarOldRef}
+                    onScroll={(e) => { if (diffRef.current) diffRef.current.style.setProperty('--hs-old', e.target.scrollLeft + 'px'); }}
+                    style={{ flex: '1 1 0', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
                     <div style={{ width: codeContentW, height: 1 }} />
                   </div>
                 </div>
                 <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex' }}>
                   <div style={{ width: GUTTER, flex: 'none' }} />
-                  <div className="loupe-hbar" data-codescroll="new" style={{ flex: '1 1 0', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
+                  <div className="loupe-hbar" ref={hbarNewRef}
+                    onScroll={(e) => { if (diffRef.current) diffRef.current.style.setProperty('--hs-new', e.target.scrollLeft + 'px'); }}
+                    style={{ flex: '1 1 0', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
                     <div style={{ width: codeContentW, height: 1 }} />
                   </div>
                 </div>
