@@ -18,6 +18,67 @@ const basename = (p) => {
   return parts[parts.length - 1] || p;
 };
 
+// Custom branch dropdown: a trigger button (current value + chevron) and a
+// fixed-positioned popover (a check per option, accent on the selected one).
+// Replaces the native <select> so Base/Target match the design kit.
+function BranchSelect({ value, options, onChange, fieldStyle }) {
+  const [open, setOpen] = React.useState(false);
+  const [rect, setRect] = React.useState(null);
+  const trigRef = React.useRef(null);
+  const popRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const close = (e) => {
+      if (trigRef.current && trigRef.current.contains(e.target)) return;
+      if (popRef.current && popRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const toggle = () => {
+    if (!open && trigRef.current) setRect(trigRef.current.getBoundingClientRect());
+    setOpen((v) => !v);
+  };
+  return (
+    <React.Fragment>
+      <button ref={trigRef} onClick={toggle} type="button"
+        style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 6, textAlign: 'left',
+          color: open ? 'var(--text-primary)' : fieldStyle.color,
+          borderColor: open ? 'var(--border-strong)' : 'var(--border-default)' }}>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
+          strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-faint)', flex: 'none',
+            transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-soft)' }}><path d="M6 9l6 6 6-6" /></svg>
+      </button>
+      {open && rect && (
+        <div ref={popRef} style={{ position: 'fixed', top: rect.bottom + 5, left: rect.left,
+          minWidth: rect.width, maxWidth: 230, zIndex: 60, background: 'var(--surface-overlay)',
+          border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
+          boxShadow: 'var(--shadow-pop)', padding: 4 }}>
+          {options.map((o) => {
+            const sel = o === value;
+            return (
+              <button key={o} type="button" onClick={() => { onChange(o); setOpen(false); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 8px',
+                  borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left', border: 'none',
+                  whiteSpace: 'nowrap', background: sel ? 'var(--accent-dim)' : 'transparent',
+                  color: sel ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  font: '12px/1 var(--font-mono)', transition: 'background var(--dur-fast) var(--ease-soft)' }}
+                onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = 'var(--surface-inset)'; }}
+                onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = 'transparent'; }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8"
+                  strokeLinecap="round" strokeLinejoin="round" style={{ color: sel ? 'var(--accent)' : 'transparent', flex: 'none' }}><path d="M20 6 9 17l-5-5" /></svg>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{o}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </React.Fragment>
+  );
+}
+
 export default function ProjectMenu({
   project, base, target, branches: branchesProp, recents: recentsProp,
   onChangeProject, onBrowse, defaultOpen = false,
@@ -162,18 +223,9 @@ export default function ProjectMenu({
   const dirty = repoPath !== project || b !== base || t !== target;
   const canCommit = !!repoPath && !!b && !!t && !branchLoading;
 
-  // <select> filled from real branches (falls back to the single staged value so
-  // the box still shows something before branches load).
-  const BranchSelect = ({ value, onChange }) => {
-    const opts = branches.length > 0 ? branches : (value ? [value] : []);
-    return (
-      <select value={value} onChange={(e) => onChange(e.target.value)}
-        disabled={opts.length === 0 || branchLoading}
-        style={{ ...fieldStyle, opacity: opts.length === 0 || branchLoading ? 0.5 : 1 }}>
-        {opts.map((x) => <option key={x} value={x}>{x}</option>)}
-      </select>
-    );
-  };
+  // Options for the custom dropdown: real branches, falling back to the field's
+  // own staged value so the box still shows something before branches load.
+  const optsFor = (value) => (branches.length > 0 ? branches : (value ? [value] : []));
 
   return (
     <div ref={ref} style={{ position: 'absolute', top: 20, left: 24, zIndex: 40, width: 296 }}>
@@ -254,11 +306,11 @@ export default function ProjectMenu({
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <label style={labelStyle}>Base</label>
-                <BranchSelect value={b} onChange={setB} />
+                <BranchSelect value={b} options={optsFor(b)} onChange={setB} fieldStyle={fieldStyle} />
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <label style={labelStyle}>Target</label>
-                <BranchSelect value={t} onChange={setT} />
+                <BranchSelect value={t} options={optsFor(t)} onChange={setT} fieldStyle={fieldStyle} />
               </div>
             </div>
 

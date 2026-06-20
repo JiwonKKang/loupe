@@ -11,6 +11,63 @@ import { KeyHint } from '../components/KeyHint';
 import ProjectMenu from '../components/ProjectMenu';
 import { highlightGo } from '../data/fixtures';
 
+// Small settings popover — adjust code text size. Opens upward from a subtle
+// "Aa" trigger in the bottom bar. Simple + intuitive: one slider, an Auto reset.
+function TextSizeMenu({ size, effective, onChange }) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const val = size != null ? size : effective;
+  const isAuto = size == null;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button onClick={() => setOpen((v) => !v)} title="Text size" aria-label="Text size"
+        style={{ display: 'inline-flex', alignItems: 'baseline', gap: 3, height: 26, padding: '0 8px',
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          background: open ? 'var(--surface-overlay)' : 'transparent',
+          border: `1px solid ${open ? 'var(--border-default)' : 'transparent'}`,
+          color: open ? 'var(--text-secondary)' : 'var(--text-tertiary)',
+          opacity: open ? 1 : 'var(--dim-rest)', transition: 'var(--t-hover)' }}>
+        <span style={{ font: 'var(--weight-semibold) 15px/1 var(--font-ui)' }}>A</span>
+        <span style={{ font: 'var(--weight-medium) 10px/1 var(--font-ui)' }}>A</span>
+      </button>
+
+      {open && (
+        <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: 0, width: 224,
+          background: 'var(--surface-overlay)', border: '1px solid var(--border-default)',
+          borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-pop)', padding: '14px 14px 12px', zIndex: 50 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <span style={{ font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)', color: 'var(--text-primary)' }}>Text size</span>
+            <span style={{ font: 'var(--text-xs)/1 var(--font-mono)', color: 'var(--text-tertiary)',
+              fontVariantNumeric: 'tabular-nums' }}>{val}px</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ font: '11px/1 var(--font-ui)', color: 'var(--text-faint)' }}>A</span>
+            <input type="range" min={8} max={20} step={1} value={val}
+              onChange={(e) => onChange(Number(e.target.value))}
+              style={{ flex: 1, accentColor: 'var(--accent)', cursor: 'pointer' }} />
+            <span style={{ font: '16px/1 var(--font-ui)', color: 'var(--text-faint)' }}>A</span>
+          </div>
+          <button onClick={() => onChange(null)} disabled={isAuto}
+            style={{ marginTop: 12, width: '100%', height: 28, borderRadius: 'var(--radius-sm)',
+              background: 'transparent', border: '1px solid var(--border-default)',
+              color: isAuto ? 'var(--text-faint)' : 'var(--text-secondary)',
+              cursor: isAuto ? 'default' : 'pointer', opacity: isAuto ? 0.5 : 1,
+              font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)' }}>
+            {isAuto ? 'Auto (fits the change)' : 'Reset to Auto'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ReviewScreen(props) {
   const {
     card, index, total, dir, project, base, target, onChangeProject, unresolved,
@@ -98,7 +155,55 @@ export default function ReviewScreen(props) {
   // a comfortable size, long ones shrink toward a readable floor (never tiny)
   // so the card needs little or no scrolling.
   const rowCount = display.reduce((n, it) => n + (it.type === 'row' ? 1 : 0), 0);
-  const codeFs = rowCount <= 16 ? 14 : rowCount <= 24 ? 13 : rowCount <= 34 ? 12 : 11;
+  const autoFs = rowCount <= 16 ? 14 : rowCount <= 24 ? 13 : rowCount <= 34 ? 12 : 11;
+  const [codeFontSize, setCodeFontSize] = React.useState(() => {
+    const v = localStorage.getItem('loupe.codeFontSize');
+    return v != null ? Number(v) : null;
+  });
+  const setFont = (v) => {
+    setCodeFontSize(v);
+    if (v == null) localStorage.removeItem('loupe.codeFontSize');
+    else localStorage.setItem('loupe.codeFontSize', String(v));
+  };
+  const codeFs = codeFontSize != null ? codeFontSize : autoFs;
+
+  // ---- No-wrap horizontal scroll ----
+  // Lines no longer wrap; the diff scrolls left/right. To keep both columns
+  // equal (centered divider) we give each side a min-width that fits the
+  // longest line, measured in real monospace px for the current font size.
+  const maxChars = React.useMemo(() => {
+    let m = 0;
+    rows.forEach((r) => {
+      if (r.left && r.left.c) m = Math.max(m, r.left.c.length);
+      if (r.right && r.right.c) m = Math.max(m, r.right.c.length);
+    });
+    return Math.max(m, 24);
+  }, [card.id]);
+  const charRef = React.useRef(null);
+  const [chPx, setChPx] = React.useState(8.4);
+  React.useLayoutEffect(() => {
+    if (charRef.current) setChPx(charRef.current.getBoundingClientRect().width / 50);
+  }, [codeFs]);
+  const GUTTER = 73; // line-number gutter + sign + code padding
+  // Each side's code area is its OWN horizontal scroller; short lines get a
+  // min-width so every line on a side scrolls by the same amount, and a
+  // capture-scroll handler keeps all lines of one side in lock-step (so the
+  // BEFORE column and the AFTER column scroll independently of each other).
+  const codeContentW = Math.ceil(maxChars * chPx + 28);
+  // Responsive card width: grows with the actual code length up to a max, so
+  // short changes get a compact card and long ones widen toward the cap.
+  const cardW = Math.max(560, Math.min(1140, (62 + codeContentW) * 2 + 6));
+  const diffRef = React.useRef(null);
+  const syncScroll = (e) => {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    const side = t.getAttribute('data-codescroll');
+    if (!side || !diffRef.current) return;
+    const sl = t.scrollLeft;
+    diffRef.current.querySelectorAll('[data-codescroll="' + side + '"]').forEach((el) => {
+      if (el !== t && Math.abs(el.scrollLeft - sl) > 0.5) el.scrollLeft = sl;
+    });
+  };
 
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -115,18 +220,19 @@ export default function ReviewScreen(props) {
   };
   const remaining = total - index - 1;
 
-  // round prev/next button, dim until hovered, clear of the card AND the deck
+  // bare thin chevron on the card's side, vertically centered (no box).
   const NavArrow = ({ side, d, disabled, onClick, label, offset }) => (
     <button onClick={disabled ? undefined : onClick} aria-label={label} title={label} disabled={disabled}
       style={{ position: 'absolute', zIndex: 3, top: '50%', transform: 'translateY(-50%)',
-        [side]: offset, width: 40, height: 40, borderRadius: 'var(--radius-pill)',
+        [side]: offset, width: 30, height: 60, padding: 0,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        background: 'var(--surface-overlay)', border: '1px solid var(--border-default)',
+        background: 'transparent', border: 'none',
         color: 'var(--text-secondary)', cursor: disabled ? 'default' : 'pointer',
-        opacity: disabled ? 0.14 : 'var(--dim-rest)', transition: 'var(--t-dim), var(--t-hover)' }}
+        opacity: disabled ? 0.12 : 'var(--dim-rest)', transition: 'var(--t-dim), var(--t-hover)' }}
       onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = 'var(--text-primary)'; } }}
       onMouseLeave={(e) => { if (!disabled) { e.currentTarget.style.opacity = 'var(--dim-rest)'; e.currentTarget.style.color = 'var(--text-secondary)'; } }}>
-      <Ico d={d} w={18} />
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
     </button>
   );
 
@@ -162,14 +268,14 @@ export default function ReviewScreen(props) {
     return (
       <div {...handlers} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '20px 30px 12px 1fr',
         alignItems: 'start', background: bg, cursor: 'default',
-        boxShadow,
-        minWidth: 0, borderLeft: side === 'new' ? '1px solid var(--border-subtle)' : 'none',
+        boxShadow, flex: '1 1 0', minWidth: 0,
+        borderLeft: side === 'new' ? '1px solid var(--border-subtle)' : 'none',
         transition: 'background var(--dur-fast) var(--ease-soft)' }}>
         {showPlus && (
           <button
             onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); }}
             title="Comment on this line (drag to select a range)"
-            style={{ position: 'absolute', zIndex: 4, left: 1, top: '50%', transform: 'translateY(-50%)',
+            style={{ position: 'absolute', zIndex: 4, left: 1, top: Math.max(0, (codeFs * 1.72 - 20) / 2),
               width: 20, height: 20, borderRadius: 'var(--radius-sm)',
               cursor: dragging ? 'grabbing' : 'pointer',
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -184,11 +290,15 @@ export default function ReviewScreen(props) {
         <span style={{ textAlign: 'right', paddingRight: 8, color: 'var(--text-faint)',
           font: codeFs + 'px/var(--leading-code) var(--font-mono)', userSelect: 'none' }}>{cell ? cell.n : ''}</span>
         <span style={{ color: side === 'old' ? 'var(--diff-del-edge)' : 'var(--diff-add-edge)',
-          userSelect: 'none', fontWeight: 600, font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>{sign}</span>
-        <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', paddingRight: 12,
-          tabSize: 2, font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
-          {cell ? highlightGo(cell.c) : ''}
-        </span>
+          userSelect: 'none', fontWeight: 600, font: codeFs + 'px/var(--leading-code) var(--font-mono)',
+          boxShadow: 'inset -1px 0 0 var(--border-subtle)' }}>{sign}</span>
+        <div className="loupe-codescroll" data-codescroll={side} style={{ overflowX: 'auto', overflowY: 'hidden', minWidth: 0,
+          font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
+          <span style={{ display: 'inline-block', minWidth: codeContentW, whiteSpace: 'pre',
+            paddingLeft: 11, paddingRight: 16, tabSize: 2 }}>
+            {cell ? highlightGo(cell.c) : ''}
+          </span>
+        </div>
       </div>
     );
   };
@@ -230,35 +340,22 @@ export default function ReviewScreen(props) {
           )}
         </div>
 
-        {/* Centered card — with a faint deck of remaining cards peeking to the RIGHT */}
+        {/* Centered card — responsive width, deep shadow (no deck) */}
         <div style={{ flex: 1, display: 'flex', alignItems: 'center',
           justifyContent: 'center', padding: '24px var(--canvas-pad)', minHeight: 0 }}>
-          <div style={{ position: 'relative', width: '100%', maxWidth: 900,
+          <div style={{ position: 'relative', width: cardW, maxWidth: '100%',
             maxHeight: '100%', display: 'flex' }}>
 
-            {/* deck: upcoming cards peeking off the right edge */}
-            {remaining >= 2 && (
-              <div aria-hidden="true" style={{ position: 'absolute', zIndex: 0,
-                top: 26, bottom: 26, left: 46, right: -40,
-                background: 'var(--bg-raised)', border: '1px solid var(--border-default)',
-                borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow-card)' }} />
-            )}
-            {remaining >= 1 && (
-              <div aria-hidden="true" style={{ position: 'absolute', zIndex: 1,
-                top: 13, bottom: 13, left: 24, right: -21,
-                background: 'var(--surface-overlay)', border: '1px solid var(--border-default)',
-                borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow-card)' }} />
-            )}
-
-            {/* side navigation arrows — prev / next (right one clears the deck) */}
-            <NavArrow side="left" d={chevL} disabled={!hasPrev} onClick={onPrev} label="Previous card" offset={-58} />
-            <NavArrow side="right" d={chevR} disabled={false} onClick={onNext} label="Next card" offset={remaining >= 1 ? -88 : -58} />
+            {/* side navigation arrows — prev (left) / next (right), vertically centered on the card */}
+            <NavArrow side="left" d={chevL} disabled={!hasPrev} onClick={onPrev} label="Previous card" offset={-56} />
+            <NavArrow side="right" d={chevR} disabled={false} onClick={onNext} label="Next card" offset={-56} />
 
           <div key={card.id} style={{
-            position: 'relative', zIndex: 2,
+            position: 'relative', zIndex: 3,
             width: '100%', maxHeight: '100%', display: 'flex', flexDirection: 'column',
             background: 'var(--surface-card)', border: '1px solid var(--border-subtle)',
-            borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow-focus)',
+            borderRadius: 'var(--radius-card)',
+            boxShadow: '0 2px 5px rgba(0,0,0,0.45), 0 20px 50px rgba(0,0,0,0.5), 0 46px 100px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05), inset 0 0 0 1px var(--border-subtle)',
             animation: `loupe-card-in var(--dur-slow) var(--ease-out)`,
             ['--enter-x']: `${dir * 36}px`, overflow: 'hidden',
           }}>
@@ -286,7 +383,7 @@ export default function ReviewScreen(props) {
                 );
               })()}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                <span style={{ font: 'var(--weight-semibold) var(--text-md)/1 var(--font-mono)',
+                <span style={{ font: 'var(--weight-semibold) var(--text-base)/1 var(--font-mono)',
                   color: 'var(--text-primary)', letterSpacing: 'var(--tracking-snug)' }}>{card.symbol}</span>
                 {verdict === 'pass' && (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 22,
@@ -297,7 +394,7 @@ export default function ReviewScreen(props) {
                 <span style={{ marginLeft: 'auto', font: 'var(--text-sm)/1 var(--font-mono)',
                   color: 'var(--text-tertiary)' }}>{card.path}</span>
               </div>
-              <div style={{ font: 'var(--text-base)/var(--leading-normal) var(--font-ui)',
+              <div style={{ font: 'var(--text-sm)/var(--leading-normal) var(--font-ui)',
                 color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.aiSummary || card.summary}</div>
             </div>
 
@@ -315,20 +412,28 @@ export default function ReviewScreen(props) {
               </div>
             ) : (
             <React.Fragment>
-            {/* Split-diff column headers */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr',
-              borderBottom: '1px solid var(--border-subtle)', background: 'var(--surface-inset)' }}>
-              <div style={{ padding: '7px 0 7px 62px', font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
-                letterSpacing: 'var(--tracking-wide)', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Before</div>
-              <div style={{ padding: '7px 0 7px 62px', font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
-                letterSpacing: 'var(--tracking-wide)', textTransform: 'uppercase', color: 'var(--text-tertiary)',
-                borderLeft: '1px solid var(--border-subtle)' }}>After</div>
-            </div>
+            {/* hidden monospace sizer — measures one char at the current size */}
+            <span ref={charRef} aria-hidden="true" style={{ position: 'absolute', visibility: 'hidden',
+              pointerEvents: 'none', whiteSpace: 'pre', font: codeFs + 'px/1 var(--font-mono)' }}>{'0'.repeat(50)}</span>
 
-            {/* Split diff */}
-            <div onMouseLeave={() => { if (!dragging) setHover(null); }}
-              style={{ overflowY: 'auto', padding: '8px 0', flex: 1, userSelect: 'none',
+            {/* Split diff — each side (BEFORE / AFTER) scrolls left/right on its own */}
+            <div ref={diffRef} onScrollCapture={syncScroll} onMouseLeave={() => { if (!dragging) setHover(null); }}
+              style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, userSelect: 'none',
               background: 'var(--surface-inset)' }}>
+
+              {/* sticky column headers */}
+              <div style={{ display: 'flex', position: 'sticky', top: 0, zIndex: 2,
+                background: 'var(--surface-inset)',
+                borderBottom: '1px solid var(--border-subtle)' }}>
+                <div style={{ flex: '1 1 0', minWidth: 0, padding: '7px 0 7px 73px',
+                  font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
+                  textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Before</div>
+                <div style={{ flex: '1 1 0', minWidth: 0, padding: '7px 0 7px 73px',
+                  font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
+                  textTransform: 'uppercase', color: 'var(--text-tertiary)', borderLeft: '1px solid var(--border-subtle)' }}>After</div>
+              </div>
+
+              <div style={{ padding: '8px 0' }}>
               {display.map((item) => {
                 if (item.type === 'fold') {
                   return (
@@ -356,7 +461,7 @@ export default function ReviewScreen(props) {
                 const isLast = active && r === hi;
                 return (
                   <React.Fragment key={r}>
-                    <div data-line={r} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+                    <div data-line={r} style={{ display: 'flex', minWidth: 0 }}>
                       <Half cell={row.left} kind={row.kind} side="old" r={r}
                         active={active} isFirst={isFirst} isLast={isLast} thread={thread} />
                       <Half cell={row.right} kind={row.kind} side="new" r={r}
@@ -370,24 +475,42 @@ export default function ReviewScreen(props) {
                       </div>
                     )}
                     {thread && !thread.open && (
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+                      <div style={{ display: 'flex', minWidth: 0 }}>
                         {(thread.side || 'old') === 'old'
-                          ? <div style={{ padding: '6px 0 8px 52px' }}>
+                          ? <div style={{ flex: '1 1 0', minWidth: 0, padding: '6px 0 8px 52px' }}>
                               <Thread messages={thread.messages} resolved={thread.resolved}
                                 collapsed onToggle={() => onOpenLine('old', r)} />
                             </div>
-                          : <span />}
+                          : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
                         {(thread.side || 'old') === 'new'
-                          ? <div style={{ padding: '6px 0 8px 52px' }}>
+                          ? <div style={{ flex: '1 1 0', minWidth: 0, padding: '6px 0 8px 52px' }}>
                               <Thread messages={thread.messages} resolved={thread.resolved}
                                 collapsed onToggle={() => onOpenLine('new', r)} />
                             </div>
-                          : <span />}
+                          : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
                       </div>
                     )}
                   </React.Fragment>
                 );
               })}
+              </div>
+
+              {/* synced horizontal scrollbars — one per side, pinned at the bottom */}
+              <div style={{ display: 'flex', position: 'sticky', bottom: 0, zIndex: 2,
+                background: 'var(--surface-inset)' }}>
+                <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex' }}>
+                  <div style={{ width: GUTTER, flex: 'none' }} />
+                  <div className="loupe-hbar" data-codescroll="old" style={{ flex: '1 1 0', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
+                    <div style={{ width: codeContentW, height: 1 }} />
+                  </div>
+                </div>
+                <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex' }}>
+                  <div style={{ width: GUTTER, flex: 'none' }} />
+                  <div className="loupe-hbar" data-codescroll="new" style={{ flex: '1 1 0', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
+                    <div style={{ width: codeContentW, height: 1 }} />
+                  </div>
+                </div>
+              </div>
             </div>
             </React.Fragment>
             )}
@@ -400,6 +523,8 @@ export default function ReviewScreen(props) {
           padding: '0 var(--canvas-pad) 30px' }}>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <TextSizeMenu size={codeFontSize} effective={autoFs} onChange={setFont} />
+            <span style={{ width: 1, height: 16, background: 'var(--border-subtle)' }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 18, opacity: 'var(--dim-rest)' }}>
               <KeyHint keys={['←', '→']} label="Move" size="sm" />
               <KeyHint keys="+" label="to comment" size="sm" tone="accent" />

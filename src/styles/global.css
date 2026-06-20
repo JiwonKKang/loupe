@@ -45,6 +45,16 @@ body { font-family: var(--font-ui); color: var(--text-primary);
 @keyframes loupe-spin {
   to { transform: rotate(360deg); }
 }
+/* Per-side code scrollers in the split diff hide their own scrollbars; a single
+   synced .loupe-hbar at the bottom of the diff drives the horizontal scroll. */
+.loupe-codescroll { scrollbar-width: none; -ms-overflow-style: none; }
+.loupe-codescroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+.loupe-hbar { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
+.loupe-hbar::-webkit-scrollbar { height: 8px; }
+.loupe-hbar::-webkit-scrollbar-track { background: transparent; }
+.loupe-hbar::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
+  border: 2px solid transparent; background-clip: padding-box; }
+.loupe-hbar:hover::-webkit-scrollbar-thumb { background: var(--border-strong); background-clip: padding-box; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
   border: 2px solid transparent; background-clip: padding-box; }
