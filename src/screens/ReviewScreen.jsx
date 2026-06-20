@@ -11,6 +11,18 @@ import { KeyHint } from '../components/KeyHint';
 import ProjectMenu from '../components/ProjectMenu';
 import { highlightGo } from '../data/fixtures';
 
+// Memoize syntax highlighting per source string: the same line text re-tokenizes
+// to the same keyed span array, so windowing (mount/unmount as you scroll) never
+// pays to re-highlight a line it has already seen. Bounded to avoid unbounded growth.
+const _hlCache = new Map();
+function hl(s) {
+  if (_hlCache.has(s)) return _hlCache.get(s);
+  const v = highlightGo(s);
+  _hlCache.set(s, v);
+  if (_hlCache.size > 5000) _hlCache.clear();
+  return v;
+}
+
 // Small settings popover — adjust code text size. Opens upward from a subtle
 // "Aa" trigger in the bottom bar. Simple + intuitive: one slider, an Auto reset.
 function TextSizeMenu({ size, effective, onChange }) {
@@ -119,8 +131,11 @@ export default function ReviewScreen(props) {
   };
 
   // thread lookup keyed by row
-  const threadByRow = {};
-  threads.forEach((t) => { threadByRow[t.lineN] = t; });
+  const threadByRow = React.useMemo(() => {
+    const m = {};
+    threads.forEach((t) => { m[t.lineN] = t; });
+    return m;
+  }, [threads]);
 
   // ---- Fold unchanged context so big functions fit at a glance ----
   // Keep CONTEXT lines of context around each change; collapse the rest into
@@ -129,7 +144,7 @@ export default function ReviewScreen(props) {
   const [expanded, setExpanded] = React.useState(() => new Set());
   React.useEffect(() => { setExpanded(new Set()); }, [card.id]);
   const CONTEXT = 2;
-  const display = (() => {
+  const display = React.useMemo(() => {
     const items = []; const N = rows.length; let i = 0;
     const hasThread = (a, b) => { for (let k = a; k < b; k++) if (threadByRow[k]) return true; return false; };
     while (i < N) {
@@ -148,7 +163,7 @@ export default function ReviewScreen(props) {
       i = j;
     }
     return items;
-  })();
+  }, [rows, expanded, threadByRow]);
 
   // Adaptive code size: a brand-new function is all additions (nothing to
   // fold), so scale the font to how many rows actually show — fewer rows get
@@ -194,16 +209,76 @@ export default function ReviewScreen(props) {
   // short changes get a compact card and long ones widen toward the cap.
   const cardW = Math.max(560, Math.min(1140, (62 + codeContentW) * 2 + 6));
   const diffRef = React.useRef(null);
+  // Remember each side's horizontal scroll position so rows that mount during
+  // windowing inherit it (a fresh <div data-codescroll> starts at scrollLeft 0).
+  const hScrollRef = React.useRef({ old: 0, new: 0 });
   const syncScroll = (e) => {
     const t = e.target;
     if (!t || !t.getAttribute) return;
     const side = t.getAttribute('data-codescroll');
     if (!side || !diffRef.current) return;
     const sl = t.scrollLeft;
+    hScrollRef.current[side] = sl;
+    // Only the currently-windowed (visible) rows are in the DOM, so this is cheap.
     diffRef.current.querySelectorAll('[data-codescroll="' + side + '"]').forEach((el) => {
       if (el !== t && Math.abs(el.scrollLeft - sl) > 0.5) el.scrollLeft = sl;
     });
   };
+
+  // ---- Vertical windowing (virtualization) for the split diff ----
+  // Estimated row height from the code line-height; recomputed when font changes.
+  const RH = Math.max(1, Math.round(codeFs * 1.72));
+  const [scrollTop, setScrollTop] = React.useState(0);
+  const [viewportH, setViewportH] = React.useState(800);
+  const scrollRaf = React.useRef(0);
+  // rAF-throttled vertical scroll: only react to the OUTER container's vertical
+  // scroll (horizontal code scrollers / hbar are handled by syncScroll above).
+  const onDiffScroll = (e) => {
+    if (e.currentTarget !== diffRef.current) return;
+    const top = e.currentTarget.scrollTop;
+    if (scrollRaf.current) return;
+    scrollRaf.current = requestAnimationFrame(() => {
+      scrollRaf.current = 0;
+      setScrollTop(top);
+    });
+  };
+  React.useEffect(() => () => { if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current); }, []);
+  // Track the viewport height of the scroll container (mount + on resize).
+  React.useEffect(() => {
+    const el = diffRef.current;
+    if (!el) return;
+    setViewportH(el.clientHeight || 800);
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => { if (diffRef.current) setViewportH(diffRef.current.clientHeight || 800); });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // card.id (not just isDefinition): the <div key={card.id}> wrapper remounts
+    // the diff container on every card change, so diffRef points at a fresh node
+    // each time — we must re-observe it (and re-measure clientHeight) per card.
+  }, [card.id, isDefinition]);
+  // Reset scroll when switching cards (the diff container is reused across cards).
+  React.useEffect(() => {
+    if (diffRef.current) diffRef.current.scrollTop = 0;
+    setScrollTop(0);
+  }, [card.id]);
+
+  const N = display.length;
+  const OVER = 14; // overscan rows above/below the viewport
+  const startIdx = Math.max(0, Math.floor(scrollTop / RH) - OVER);
+  const endIdx = Math.min(N, Math.ceil((scrollTop + viewportH) / RH) + OVER);
+
+  // When the windowed slice changes (or font changes), give the freshly-mounted
+  // rows the current horizontal scroll position so columns stay aligned.
+  React.useLayoutEffect(() => {
+    if (!diffRef.current) return;
+    ['old', 'new'].forEach((side) => {
+      const x = hScrollRef.current[side];
+      if (!x) return;
+      diffRef.current.querySelectorAll('[data-codescroll="' + side + '"]').forEach((el) => {
+        if (Math.abs(el.scrollLeft - x) > 0.5) el.scrollLeft = x;
+      });
+    });
+  }, [startIdx, endIdx, codeFs]);
 
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -296,7 +371,7 @@ export default function ReviewScreen(props) {
           font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
           <span style={{ display: 'inline-block', minWidth: codeContentW, whiteSpace: 'pre',
             paddingLeft: 11, paddingRight: 16, tabSize: 2 }}>
-            {cell ? highlightGo(cell.c) : ''}
+            {cell ? hl(cell.c) : ''}
           </span>
         </div>
       </div>
@@ -417,7 +492,7 @@ export default function ReviewScreen(props) {
               pointerEvents: 'none', whiteSpace: 'pre', font: codeFs + 'px/1 var(--font-mono)' }}>{'0'.repeat(50)}</span>
 
             {/* Split diff — each side (BEFORE / AFTER) scrolls left/right on its own */}
-            <div ref={diffRef} onScrollCapture={syncScroll} onMouseLeave={() => { if (!dragging) setHover(null); }}
+            <div ref={diffRef} onScrollCapture={syncScroll} onScroll={onDiffScroll} onMouseLeave={() => { if (!dragging) setHover(null); }}
               style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, userSelect: 'none',
               background: 'var(--surface-inset)' }}>
 
@@ -434,7 +509,8 @@ export default function ReviewScreen(props) {
               </div>
 
               <div style={{ padding: '8px 0' }}>
-              {display.map((item) => {
+              <div style={{ height: startIdx * RH }} />
+              {display.slice(startIdx, endIdx).map((item) => {
                 if (item.type === 'fold') {
                   return (
                     <div key={'fold-' + item.key} onClick={() => setExpanded((s) => new Set(s).add(item.key))}
@@ -493,6 +569,7 @@ export default function ReviewScreen(props) {
                   </React.Fragment>
                 );
               })}
+              <div style={{ height: (N - endIdx) * RH }} />
               </div>
 
               {/* synced horizontal scrollbars — one per side, pinned at the bottom */}
