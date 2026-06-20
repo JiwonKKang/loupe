@@ -140,7 +140,9 @@ export default function ReviewScreen(props) {
     i >= Math.min(dragFrom, dragTo) && i <= Math.max(dragFrom, dragTo);
   const endDrag = () => {
     if (dragFrom == null) return;
-    const side = dragSide, f = dragFrom;
+    // Anchor the thread (and its collapsed badge) on the row where the drag
+    // ENDED, not where it began.
+    const side = dragSide, f = dragTo != null ? dragTo : dragFrom;
     setDragSide(null); setDragFrom(null); setDragTo(null);
     onOpenLine(side, f);
   };
