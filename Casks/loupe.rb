@@ -8,7 +8,7 @@ cask "loupe" do
   desc "Human-first code review desktop app (data-flow ordered, AI-assisted)"
   homepage "https://github.com/JiwonKKang/loupe"
 
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
 
   app "Loupe.app"
 
