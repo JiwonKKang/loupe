@@ -292,27 +292,75 @@ export default function App() {
       return;
     }
     const id = 't' + (tid.current++);
+    // No fabricated AI opener — a fresh thread is just the composer (empty
+    // messages). The first real AI text arrives only after the user asks.
     setThreads((p) => [...p, {
       id, cardId: card.id, side: side || 'old', lineN, symbol: card.symbol, open: true, resolved: false,
-      messages: [{ author: 'ai', text: aiSeed(card), time: 'now' }],
+      messages: [], pending: false,
     }]);
   };
+
+  // Build the `context` string the backend sees: which symbol/file, a diff
+  // excerpt (windowed around the asked row for big cards), and which line the
+  // question targets. `t` is the thread (for lineN/side); `c` is its card.
+  const buildThreadContext = React.useCallback((c, t) => {
+    if (!c) return '';
+    const lines = c.lines || [];
+    // Render each diff line as `+`/`-`/` ` + code (unified-diff style).
+    const sign = (ln) => (ln.t === 'add' ? '+' : ln.t === 'del' ? '-' : ' ');
+    const total = lines.length;
+    // Windowing: for big cards, only send ±WIN lines around the asked row so
+    // the prompt stays bounded. `lineN` is a ROW index into the diff list.
+    const WIN = 60;
+    let from = 0, to = total, windowed = false;
+    if (total > WIN * 2 + 1) {
+      const anchor = Math.max(0, Math.min(total - 1, t && t.lineN != null ? t.lineN : 0));
+      from = Math.max(0, anchor - WIN);
+      to = Math.min(total, anchor + WIN + 1);
+      windowed = from > 0 || to < total;
+    }
+    const body = lines.slice(from, to).map((ln) => sign(ln) + ln.c).join('\n');
+    const header = `심볼: ${c.symbol || '(이름 없음)'}\n파일: ${c.path || '(경로 없음)'}`;
+    const span = windowed
+      ? `\n(diff 발췌: 전체 ${total}줄 중 ${from + 1}–${to}줄 발췌)`
+      : `\n(diff 전체 ${total}줄)`;
+    const side = t && t.side ? t.side : 'old';
+    const target = `\n\n질문 대상: line ${t && t.lineN != null ? t.lineN : '?'} (${side})`;
+    return `${header}${span}\n\n${body}${target}`;
+  }, []);
+
   const sendThread = (id, text, kind) => {
+    // Append the user's message (kept for both questions and commands).
     setThreads((p) => p.map((t) => t.id === id
       ? { ...t, messages: [...t.messages, { author: 'you', text, time: 'now', kind: kind || 'question' }] } : t));
-    // Only questions get an AI reply; commands are change requests for the summary.
+    // Commands are change requests captured for the summary — no AI reply.
     if (kind === 'command') return;
-    setTimeout(() => {
-      setThreads((p) => p.map((t) => t.id === id
-        ? { ...t, messages: [...t.messages, { author: 'ai', text: 'Good question — based on the surrounding change, that path is exercised by the new lease check; the previous behavior is preserved for the non-expired case.', time: 'now' }] } : t));
-    }, 650);
+
+    // Snapshot the thread + its card BEFORE the async call so context/history
+    // reflect the state at ask-time. `history` is every message up to (and
+    // excluding) this question.
+    const t = threads.find((x) => x.id === id);
+    if (!t) return;
+    const c = (cards || []).find((x) => x.id === t.cardId);
+    const context = buildThreadContext(c, t);
+    const history = t.messages.map((m) => ({ author: m.author, text: m.text }));
+
+    // Mark the thread as thinking (spinner row in Thread.jsx).
+    setThreads((p) => p.map((x) => x.id === id ? { ...x, pending: true } : x));
+
+    invoke('ask_thread', { token, context, question: text, history })
+      .then((answer) => {
+        setThreads((p) => p.map((x) => x.id === id
+          ? { ...x, pending: false, messages: [...x.messages, { author: 'ai', text: String(answer), time: 'now' }] }
+          : x));
+      })
+      .catch((err) => {
+        setThreads((p) => p.map((x) => x.id === id
+          ? { ...x, pending: false, messages: [...x.messages, { author: 'ai', text: '⚠️ 답변을 못 받았어요: ' + String(err), time: 'now' }] }
+          : x));
+      });
   };
   const resolveThread = (id) => setThreads((p) => p.map((t) => t.id === id ? { ...t, resolved: !t.resolved, open: false } : t));
-
-  function aiSeed(c) {
-    const s = c.summary || 'this change.';
-    return `This change: ${s.charAt(0).toLowerCase() + s.slice(1)} Ask a question, or ⌘⏎ to leave a change request.`;
-  }
 
   // Keyboard — review screen only. Declared before any early return (hooks rule).
   React.useEffect(() => {

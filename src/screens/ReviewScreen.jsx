@@ -605,6 +605,7 @@ export default function ReviewScreen(props) {
                     {thread && thread.open && (
                       <div style={{ padding: '8px 28px 12px 52px' }}>
                         <Thread messages={thread.messages} resolved={thread.resolved}
+                          pending={thread.pending}
                           collapsed={false} onToggle={() => onOpenLine(thread.side || 'old', r)}
                           onResolve={() => onResolve(thread.id)} onSend={(t, kind) => onSend(thread.id, t, kind)} />
                       </div>

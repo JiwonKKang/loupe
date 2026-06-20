@@ -8,6 +8,7 @@ import React from 'react';
 export function Thread({
   messages = [],
   resolved = false,
+  pending = false,
   collapsed = false,
   onToggle,
   onResolve,
@@ -91,6 +92,18 @@ export function Thread({
             </div>
           );
         })}
+
+        {/* AI is composing a real answer — a quiet "thinking" row with a spinner.
+            Shows beneath the messages (works even when messages is empty). */}
+        {pending && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 12, height: 12, borderRadius: 999, flex: 'none',
+              border: '2px solid var(--accent-line)', borderTopColor: 'var(--accent)',
+              animation: 'loupe-spin 0.7s linear infinite' }} />
+            <span style={{ font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)',
+              color: 'var(--text-tertiary)' }}>AI가 생각 중…</span>
+          </div>
+        )}
       </div>
 
       {!resolved && (

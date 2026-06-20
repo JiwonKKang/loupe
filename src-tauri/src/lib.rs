@@ -126,6 +126,94 @@ async fn verify_token(token: String) -> Result<(), String> {
         .map_err(|e| format!("could not reach the model: {e}"))
 }
 
+/// One prior message in a thread conversation, as supplied by the front-end. `author` is the
+/// literal `"you"` (the human) or `"ai"` (a previous assistant reply); any other value is
+/// treated as the human side when rendering the transcript. Tauri deserialises the JS array
+/// `[{author, text}]` into `Vec<ThreadTurn>` (fields are already snake_case-free, so no rename
+/// is needed).
+#[derive(serde::Deserialize)]
+struct ThreadTurn {
+    author: String,
+    text: String,
+}
+
+/// Ask a free-text follow-up question about a selected region of a diff.
+///
+/// The front-end calls `invoke('ask_thread', { token, context, question, history })`. `context`
+/// is the front-end-assembled string (card symbol/path + a windowed diff excerpt + a "user is
+/// asking about line N (side)" marker); `question` is the user's current message; `history` is
+/// the prior turns of this thread (this question excluded). The reply is a plain string (the
+/// model's natural-language answer).
+///
+/// Auth mirrors `analyze_review` / `verify_token`: `validate_token` runs first (whitespace /
+/// non-ASCII / empty rejected, token never logged), then a `CliProvider` (Sonnet via the
+/// `claude` CLI) is built with the moved-in token. We use the `Quality` tier because answer
+/// quality matters more than latency here, and `json_schema: None` so the model returns free
+/// text. `temperature: 0.3` keeps answers grounded but not robotic.
+///
+/// Extraction: with no schema, `CliProvider` puts the model's text in `CompletionResponse.json`
+/// as a `Value::String` (the free-text fallback in `cli::parse_wrapper`). We return that string
+/// directly; on the off chance the model emitted JSON, we hand back its compact serialisation so
+/// the caller still gets the text rather than an error.
+#[tauri::command]
+async fn ask_thread(
+    token: String,
+    context: String,
+    question: String,
+    history: Vec<ThreadTurn>,
+) -> Result<String, String> {
+    use engine::ai::{CompletionRequest, LlmProvider, ModelTier};
+
+    let token = validate_token(&token)?;
+    let provider = engine::ai::cli::CliProvider::new(token);
+
+    let system = "You are a senior engineer reviewing a code change together with a user. \
+         The user has selected one region of a diff and is asking about it. Answer concisely and \
+         concretely, grounded in the provided diff. Reply in the user's language (if the question \
+         is in Korean, answer in Korean). If you do not know, say so."
+        .to_string();
+
+    // user message = front-end context, then the prior transcript (author → User/Assistant),
+    // then the current question last.
+    let mut user = context;
+    user.push_str("\n\n--- Conversation so far ---\n");
+    for turn in &history {
+        let role = if turn.author == "ai" {
+            "Assistant"
+        } else {
+            "User"
+        };
+        user.push_str(role);
+        user.push_str(": ");
+        user.push_str(&turn.text);
+        user.push('\n');
+    }
+    user.push_str("\nUser: ");
+    user.push_str(&question);
+
+    let req = CompletionRequest {
+        system,
+        user,
+        max_tokens: 1024,
+        json_schema: None,
+        tier: ModelTier::Quality,
+        temperature: 0.3,
+    };
+
+    let resp = provider
+        .complete(req)
+        .await
+        .map_err(|e| format!("could not reach the model: {e}"))?;
+
+    // Free-text path: parse_wrapper stores plain text as Value::String. Return it directly;
+    // if the model returned structured JSON instead, hand back its compact serialisation.
+    let text = match resp.json {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    };
+    Ok(text)
+}
+
 /// Re-emits engine pipeline milestones over the `analyze://progress` Tauri event so the
 /// front-end `AnalyzeScreen` can mirror the real stages live. Holds a clone of the app handle;
 /// `emit` is best-effort (a dropped event only affects the loader, never the result).
@@ -215,6 +303,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_review,
             analyze_review,
+            ask_thread,
             list_branches,
             verify_token,
             save_token,
