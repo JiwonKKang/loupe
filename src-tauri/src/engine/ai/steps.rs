@@ -59,6 +59,14 @@ const COMBINED_MAX_TOKENS: u32 = 4096;
 /// clusters in one batch — larger than the id-only calls, but bounded by cluster count.
 const LABEL_MAX_TOKENS: u32 = 8192;
 
+/// B1 fallback title/summary substituted when a cluster's labelling call fails or omits it
+/// (`label_one` / `verify_labels` / `backfill_missing_labels`). **Centralised** so the caching
+/// layer can DETECT a fallen-back cluster (`mod::layout_is_cacheable`) and refuse to cache it —
+/// a transient label failure must never freeze "변경 사항" into the SHA cache (it would then be
+/// served on every re-open with no re-run). Changing these strings keeps detection in sync.
+pub const FALLBACK_TITLE: &str = "변경 사항";
+pub const FALLBACK_SUMMARY: &str = "이 클러스터의 변경 사항입니다.";
+
 /// One cluster the AI produced: a (volatile) label, the member card ids, and a kind.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -656,9 +664,10 @@ fn backfill_missing_labels(mut labels: LabelResult, inputs: &[LabelInput]) -> La
     for inp in missing {
         labels.clusters.push(ClusterLabel {
             cluster_id: inp.cluster_id.clone(),
-            // B1 fallback 문자열도 한국어 (label 한국어 확정).
-            title: "변경 사항".to_string(),
-            summary: "이 클러스터의 변경 사항입니다.".to_string(),
+            // B1 fallback 문자열도 한국어 (label 한국어 확정). Centralised so the cache layer
+            // can detect a fallen-back cluster and refuse to cache the layout.
+            title: FALLBACK_TITLE.to_string(),
+            summary: FALLBACK_SUMMARY.to_string(),
             // A skipped cluster has no per-card summaries; the affected cards' ai_summary
             // stays None (Optional — no B1 impact, the statistical card summary is intact).
             card_summaries: Vec::new(),

@@ -339,6 +339,32 @@ async fn empty_cards_produce_empty_layout_without_calls() {
     assert_eq!(provider.call_count(), 0);
 }
 
+#[tokio::test]
+async fn cache_guard_rejects_layouts_with_fallen_back_labels() {
+    // `label_one` never errors the pipeline — a failed label call yields the B1 fallback
+    // title (`FALLBACK_TITLE`). Such a *transiently failed* layout must be flagged
+    // un-cacheable so a one-off label failure is never frozen into the SHA cache and served
+    // forever. Here a successful run is cacheable; flipping a title to the fallback makes it not.
+    let cards = vec![card("seed-1", &[("a", "create")])];
+    let provider = SeqProvider::with_labels(
+        vec![json!({
+            "clusters": [ { "clusterId": "k1", "memberCardIds": ["a"], "kind": "flow" } ],
+            "unclustered": [],
+            "clusterOrder": ["k1"]
+        })],
+        &[("k1", "생성 흐름", "Creates.")],
+    );
+    let mut layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
+        .await
+        .expect("pipeline succeeds");
+
+    // Real label ⇒ the layout is cacheable.
+    assert!(super::layout_is_cacheable(&layout), "real titles ⇒ cacheable");
+    // A transient label failure surfaces as the B1 fallback title ⇒ NOT cacheable.
+    layout.clusters[0].title = super::ai::steps::FALLBACK_TITLE.to_string();
+    assert!(!super::layout_is_cacheable(&layout), "fallback title ⇒ not cacheable");
+}
+
 // ===========================================================================
 // Stage-⑥ per-card AI summary (cardSummaries → ClusterLayout.card_summaries → ai_summary)
 // ===========================================================================

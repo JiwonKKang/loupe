@@ -493,9 +493,28 @@ pub async fn analyze_clusters_cached(
     .await
     .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))?;
 
-    // Store the assembled head layout so a re-open is the AI-0-call path.
-    let _ = cache.put_layout(repo_path, &shas.merge_base_sha, &shas.head_sha, &layout);
+    // Store the assembled head layout so a re-open is the AI-0-call path — but ONLY if its
+    // labels actually succeeded. A layout with a fallen-back cluster label is a transient
+    // failure; caching it would freeze "변경 사항" and serve it on every re-open (§ see
+    // `layout_is_cacheable`). On a fallen-back layout we skip the cache so the next open re-runs.
+    if layout_is_cacheable(&layout) {
+        let _ = cache.put_layout(repo_path, &shas.merge_base_sha, &shas.head_sha, &layout);
+    }
     Ok(layout)
+}
+
+/// Whether a freshly-produced layout is complete enough to **cache**. `label_one` never errors
+/// the pipeline — on an AI/parse failure it returns the B1 fallback label
+/// ([`ai::steps::FALLBACK_TITLE`] / [`ai::steps::FALLBACK_SUMMARY`]). That makes a *transiently
+/// failed* labelling indistinguishable from a real one at the layout level, so without this
+/// guard a one-off label failure (rate-limit, auth blip) would be cached and served forever
+/// (SHA-cache hit ⇒ no re-run). We therefore refuse to cache a layout where ANY cluster's
+/// title/summary is the fallback string — the next open re-runs and regenerates real labels.
+/// (An empty PR has no clusters ⇒ cacheable; a genuine success has real titles ⇒ cacheable.)
+fn layout_is_cacheable(layout: &ClusterLayout) -> bool {
+    !layout.clusters.iter().any(|c| {
+        c.title == ai::steps::FALLBACK_TITLE || c.summary == ai::steps::FALLBACK_SUMMARY
+    })
 }
 
 /// Run the **whole-input** AI pipeline once with the cache in front (§8.2 캐싱).
@@ -535,7 +554,11 @@ async fn run_cluster_pipeline_cached(
     // per-cluster review events to the loader.
     let layout = run_cluster_pipeline(provider, cards, hints, progress).await?;
 
-    let _ = cache.put_cluster(repo_path, merge_base_sha, &set_hash, &layout);
+    // Only cache a layout whose labels succeeded — a fallen-back label means a transient
+    // failure that must not be frozen into the cache (see `layout_is_cacheable`).
+    if layout_is_cacheable(&layout) {
+        let _ = cache.put_cluster(repo_path, merge_base_sha, &set_hash, &layout);
+    }
     Ok(layout)
 }
 
