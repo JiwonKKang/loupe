@@ -91,19 +91,25 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
                 </div>
               </div>
             )}
-            {g.items.map((it) => {
+            {/* Collapsed rail: ONE dot per cluster (not per card) — the spine reads as the
+                cluster narrative at rest. Kind-colored (matches the expanded header dot);
+                lights up when the focused card lives in this cluster; click jumps to it. */}
+            {!expanded && (() => {
+              const groupActive = g.items.some((it) => it.id === activeId);
+              const col = groupActive ? statusColor.active : (KIND_COLOR[g.kind] || 'var(--text-faint)');
+              const firstId = g.items[0] && g.items[0].id;
+              return (
+                <div title={g.title} onClick={() => firstId && onSelect && onSelect(firstId)} style={{
+                  width: groupActive ? 7 : 5, height: groupActive ? 7 : 5, borderRadius: 999,
+                  background: col, cursor: onSelect ? 'pointer' : 'default',
+                  boxShadow: groupActive ? '0 0 0 4px var(--accent-dim)' : 'none',
+                  transition: 'var(--t-hover)',
+                }} />
+              );
+            })()}
+            {expanded && g.items.map((it) => {
               const active = it.id === activeId;
               const col = active ? statusColor.active : statusColor[it.status] || statusColor.pending;
-              if (!expanded) {
-                return (
-                  <div key={it.id} title={it.label} style={{
-                    width: active ? 7 : 5, height: active ? 7 : 5, borderRadius: 999,
-                    background: col,
-                    boxShadow: active ? '0 0 0 4px var(--accent-dim)' : 'none',
-                    transition: 'var(--t-hover)',
-                  }} />
-                );
-              }
               return (
                 <button key={it.id} onClick={() => onSelect && onSelect(it.id)} style={{
                   display: 'flex', alignItems: 'center', gap: 11, width: '100%',
