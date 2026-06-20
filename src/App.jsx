@@ -267,7 +267,12 @@ export default function App() {
     return { pos: pos + 1, of: members.length };
   }, [list, clusterOf]);
 
-  const threadCount = (cid) => threads.filter((t) => t.cardId === cid).length;
+  // Sidebar count = total messages across the card's threads (question = 1,
+  // +AI reply = 2). An empty (drag-only, no message) thread contributes 0, so
+  // it doesn't show a phantom "1". Updates live as replies land.
+  const threadCount = (cid) => threads
+    .filter((t) => t.cardId === cid)
+    .reduce((n, t) => n + (t.messages ? t.messages.length : 0), 0);
   // A card with unresolved threads IS the "flag" (Needs attention).
   const hasUnresolved = (cid) => threads.some((t) => t.cardId === cid && !t.resolved);
   // #8 — a card has an unread answer if any of its threads is in unreadThreads.
@@ -309,6 +314,19 @@ export default function App() {
   // render-scoped `card` would be stale by the time the promise settles.
   const activeCardIdRef = React.useRef(null);
   React.useEffect(() => { activeCardIdRef.current = card ? card.id : null; }, [card]);
+
+  // Leaving a card auto-closes its threads: drop drag-only empties (no message)
+  // and collapse any open messaged thread back to its badge — you shouldn't
+  // return to a card with a thread still hanging open.
+  React.useEffect(() => {
+    setThreads((p) => {
+      const next = p
+        .filter((t) => t.messages && t.messages.length > 0)
+        .map((t) => (t.open ? { ...t, open: false } : t));
+      if (next.length === p.length && next.every((t, i) => t === p[i])) return p; // unchanged → keep ref
+      return next;
+    });
+  }, [card ? card.id : null]);
 
   // Mark a thread as read (#8): remove it from unreadThreads. Identity-stable
   // (no-op when the id wasn't unread) so it never forces a needless re-render.

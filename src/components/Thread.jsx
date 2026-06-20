@@ -1,4 +1,6 @@
 import React from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 /**
  * Thread — an inline, GitHub-style conversation anchored to a code line.
@@ -72,31 +74,28 @@ export function Thread({
       animation: closing
         ? 'loupe-thread-out 0.17s var(--ease-out) forwards'
         : 'loupe-thread-in var(--dur-slow) var(--ease-out)',
-      // Generous top padding: the action buttons + first content sit well clear
-      // of the top edge, so even if a pixel or two gets clipped near the sticky
-      // header the buttons stay fully visible (top zone is just padding).
-      padding: '22px 16px 14px', ...style,
+      padding: '14px 16px 13px', ...style,
     }}>
       {/* quiet top-right actions: collapse + resolve */}
-      <div style={{ position: 'absolute', top: 16, right: 12, display: 'flex', gap: 2 }}>
+      <div style={{ position: 'absolute', top: 7, right: 11, display: 'flex', gap: 2 }}>
         <button onClick={closeWith(onToggle)} title="Collapse" style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          width: 24, height: 24, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          width: 28, height: 28, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
           background: 'transparent', border: 'none', color: 'var(--text-tertiary)' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 15l-6-6-6 6" /></svg>
         </button>
         <button onClick={closeWith(onResolve)} title={resolved ? 'Resolved' : 'Resolve'} style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          width: 24, height: 24, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          width: 28, height: 28, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
           background: 'transparent', border: 'none',
           color: resolved ? 'var(--pass)' : 'var(--text-tertiary)' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
         </button>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingRight: 44 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingRight: 52 }}>
         {messages.map((m, i) => {
           const ai = m.author === 'ai';
           const command = m.kind === 'command';
@@ -112,7 +111,11 @@ export function Thread({
                 {!ai && <span style={{ font: 'var(--weight-medium) 10px/1 var(--font-ui)', color: accent }}>{label}</span>}
               </div>
               <div style={{ font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)',
-                color: ai ? 'var(--text-secondary)' : 'var(--text-primary)', textWrap: 'pretty' }}>{m.text}</div>
+                color: ai ? 'var(--text-secondary)' : 'var(--text-primary)', textWrap: 'pretty' }}>
+                {ai
+                  ? <div className="loupe-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown></div>
+                  : m.text}
+              </div>
             </div>
           );
         })}

@@ -59,6 +59,27 @@ body { font-family: var(--font-ui); color: var(--text-primary);
   from { opacity: 0; transform: translateY(5px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+/* Markdown rendering for AI thread replies (react-markdown). Compact,
+   theme-matched; inherits font/color from the message wrapper. */
+.loupe-md > :first-child { margin-top: 0; }
+.loupe-md > :last-child { margin-bottom: 0; }
+.loupe-md p { margin: 0 0 8px; }
+.loupe-md a { color: var(--accent); text-underline-offset: 2px; }
+.loupe-md code { font: var(--text-xs)/1.4 var(--font-mono);
+  background: var(--surface-inset); border-radius: 4px; padding: 1px 5px; }
+.loupe-md pre { margin: 0 0 8px; padding: 9px 11px; background: var(--surface-inset);
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); overflow-x: auto; }
+.loupe-md pre code { background: none; padding: 0; font: var(--text-xs)/1.55 var(--font-mono); }
+.loupe-md ul, .loupe-md ol { margin: 0 0 8px; padding-left: 18px; }
+.loupe-md li { margin-bottom: 3px; }
+.loupe-md li > p { margin: 0; }
+.loupe-md h1, .loupe-md h2, .loupe-md h3 {
+  font: var(--weight-semibold) var(--text-sm)/1.3 var(--font-ui); margin: 4px 0 6px; }
+.loupe-md blockquote { margin: 0 0 8px; padding-left: 10px;
+  border-left: 2px solid var(--border-default); color: var(--text-tertiary); }
+.loupe-md strong { font-weight: var(--weight-semibold); color: var(--text-primary); }
+.loupe-md table { border-collapse: collapse; margin: 0 0 8px; }
+.loupe-md th, .loupe-md td { border: 1px solid var(--border-subtle); padding: 3px 8px; text-align: left; }
 /* AnalyzeScreen per-cluster review spinner. */
 @keyframes loupe-spin {
   to { transform: rotate(360deg); }
