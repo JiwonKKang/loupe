@@ -450,18 +450,34 @@ export default function ReviewScreen(props) {
         {/* Top-left project / branch menu — switch projects anytime */}
         <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} />
 
-        {/* Minimal top bar — progress · chapter */}
+        {/* Top bar — the cluster you're reviewing (prominent) + a subtle progress count.
+            The cluster title is the orienting label, so it reads clearly (not dimmed). */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
-          gap: 12, padding: '26px 0 0', opacity: 'var(--dim-rest)',
-          font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
-          color: 'var(--text-secondary)', letterSpacing: 'var(--tracking-wide)' }}>
-          <span style={{ color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
+          gap: 10, padding: '24px 0 0' }}>
+          <span style={{ color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums',
+            font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
+            letterSpacing: 'var(--tracking-wide)', opacity: 'var(--dim-rest)' }}>
             {String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}
           </span>
           <span style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--text-faint)' }} />
-          <span style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {cluster ? cluster.title : card.chapter}
-          </span>
+          {cluster ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+              <span style={{ width: 6, height: 6, borderRadius: 999, flex: 'none',
+                background: cluster.id === '__unclustered' ? 'var(--text-faint)' : 'var(--accent)' }} />
+              <span style={{ maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                font: 'var(--weight-semibold) var(--text-base)/1.2 var(--font-ui)',
+                color: 'var(--text-primary)', letterSpacing: 'var(--tracking-snug)' }}>{cluster.title}</span>
+              {clusterIndex && clusterIndex.of > 1 && (
+                <span style={{ flex: 'none', fontVariantNumeric: 'tabular-nums',
+                  font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-faint)',
+                  letterSpacing: 'var(--tracking-wide)' }}>{clusterIndex.pos}/{clusterIndex.of}</span>
+              )}
+            </span>
+          ) : (
+            <span style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)', color: 'var(--text-secondary)',
+              opacity: 'var(--dim-rest)' }}>{card.chapter}</span>
+          )}
           {analysisState === 'clustering' && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5,
               font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-faint)' }}>
@@ -491,29 +507,9 @@ export default function ReviewScreen(props) {
             animation: `loupe-card-in var(--dur-slow) var(--ease-out)`,
             ['--enter-x']: `${dir * 36}px`, overflow: 'hidden',
           }}>
-            {/* Card header */}
+            {/* Card header — the cluster name lives in the top bar now, not on the card. */}
             <div style={{ padding: '22px var(--gutter-card) 18px',
               borderBottom: '1px solid var(--border-subtle)' }}>
-              {/* Cluster band — cluster title + position in this cluster (⑧). The kind
-                  badge ("Flow/Contract/…") was removed — it read as clutter on the card. */}
-              {cluster && (() => {
-                const muted = cluster.id === '__unclustered';
-                return (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 12,
-                    opacity: muted ? 0.7 : 1 }}>
-                    <span style={{ minWidth: 0, font: 'var(--weight-medium) var(--text-sm)/1.2 var(--font-ui)',
-                      color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap' }}>{cluster.title}</span>
-                    {clusterIndex && clusterIndex.of > 1 && (
-                      <span style={{ marginLeft: 'auto', flex: 'none', fontVariantNumeric: 'tabular-nums',
-                        font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-faint)',
-                        letterSpacing: 'var(--tracking-wide)' }}>
-                        {clusterIndex.pos} / {clusterIndex.of} in this cluster
-                      </span>
-                    )}
-                  </div>
-                );
-              })()}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
                 <span style={{ font: 'var(--weight-semibold) var(--text-base)/1 var(--font-mono)',
                   color: 'var(--text-primary)', letterSpacing: 'var(--tracking-snug)' }}>{card.symbol}</span>
