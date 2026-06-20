@@ -91,12 +91,12 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
                 </div>
               </div>
             )}
-            {/* Collapsed rail: ONE dot per cluster (not per card) — the spine reads as the
-                cluster narrative at rest. Kind-colored (matches the expanded header dot);
-                lights up when the focused card lives in this cluster; click jumps to it. */}
+            {/* Collapsed rail: ONE dot per cluster (not per card). The spine is quiet — every
+                dot is the same faint tone (no per-kind colors competing); only the cluster
+                holding the focused card lights up (accent + glow). Click jumps to it. */}
             {!expanded && (() => {
               const groupActive = g.items.some((it) => it.id === activeId);
-              const col = groupActive ? statusColor.active : (KIND_COLOR[g.kind] || 'var(--text-faint)');
+              const col = groupActive ? statusColor.active : 'var(--text-faint)';
               const firstId = g.items[0] && g.items[0].id;
               return (
                 <div title={g.title} onClick={() => firstId && onSelect && onSelect(firstId)} style={{
