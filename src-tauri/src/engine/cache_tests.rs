@@ -55,6 +55,7 @@ fn layout(cluster_id: &str, ids: &[&str]) -> ClusterLayout {
             .iter()
             .map(|id| (id.to_string(), format!("{id} 변경 요약")))
             .collect(),
+        fallback: false,
     }
 }
 

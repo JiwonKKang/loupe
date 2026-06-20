@@ -6,6 +6,7 @@
    API key wins over the setup-token when both are present). */
 
 import React from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Button } from '../components/Button';
 import { KeyHint } from '../components/KeyHint';
 import Logo from '../components/Logo';
@@ -13,6 +14,8 @@ import Logo from '../components/Logo';
 export default function Onboarding(props) {
   const [token, setToken] = React.useState('');
   const [tested, setTested] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
+  const [testErr, setTestErr] = React.useState(null);
   const [copied, setCopied] = React.useState(false);
   const [advanced, setAdvanced] = React.useState(false);
   const [apiKey, setApiKey] = React.useState('');
@@ -36,6 +39,23 @@ export default function Onboarding(props) {
 
   // The value we hand up: the Advanced API key wins over the pasted setup-token.
   const chosen = (apiKey.trim() || token.trim());
+
+  // Test connection: actually verify the chosen token with a minimal live model call
+  // (backend `verify_token`). Success keeps the existing tested=true flow (enables
+  // Continue); failure shows a red error and leaves tested=false.
+  const test = async () => {
+    setTesting(true);
+    setTestErr(null);
+    try {
+      await invoke('verify_token', { token: chosen });
+      setTested(true);
+    } catch (e) {
+      setTested(false);
+      setTestErr(String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
@@ -73,20 +93,24 @@ export default function Onboarding(props) {
 
         <label style={labelStyle}>2 · Paste the token</label>
         <input type="password" value={token} placeholder="sk-ant-…"
-          onChange={(e) => { setToken(e.target.value); setTested(false); }}
+          onChange={(e) => { setToken(e.target.value); setTested(false); setTestErr(null); }}
           style={{ ...fieldStyle, fontFamily: 'var(--font-mono)', marginBottom: 14 }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {/* Test connection is a local sanity stub for now — it gates Continue so
-             the user pastes *something* before we persist it; App re-validates on
-             save_token (whitespace/non-ASCII rejected by the backend). */}
+          {/* Test connection makes one minimal live model call (backend `verify_token`)
+             so a bad/expired token is caught here, before we persist it. Success gates
+             Continue (tested=true); failure shows the error below and leaves it disabled. */}
           <Button variant={tested ? 'secondary' : 'primary'} size="sm"
-            disabled={chosen.length < 6}
-            onClick={() => setTested(true)}>Test connection</Button>
-          {tested && (
+            disabled={chosen.length < 6 || testing}
+            onClick={test}>{testing ? 'Testing…' : 'Test connection'}</Button>
+          {tested && !testing && (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6,
               color: 'var(--pass)', font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)' }}>
               <Ico d={check} w={15} /> Connected
             </span>
+          )}
+          {testErr && !testing && (
+            <span style={{ font: 'var(--text-sm)/1.4 var(--font-ui)', color: 'var(--flag)',
+              maxWidth: 280, textWrap: 'pretty' }}>{testErr}</span>
           )}
         </div>
 
@@ -104,7 +128,7 @@ export default function Onboarding(props) {
             <div style={{ marginTop: 14 }}>
               <label style={labelStyle}>API key (instead of a token)</label>
               <input type="password" value={apiKey} placeholder="sk-ant-api03-…"
-                onChange={(e) => { setApiKey(e.target.value); setTested(false); }}
+                onChange={(e) => { setApiKey(e.target.value); setTested(false); setTestErr(null); }}
                 style={{ ...fieldStyle, fontFamily: 'var(--font-mono)' }} />
             </div>
           )}

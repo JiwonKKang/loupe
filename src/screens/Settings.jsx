@@ -39,6 +39,9 @@ export default function Settings({ connected = false, onBack, onSaved, onCleared
     setBusy(true);
     setStatus(null);
     try {
+      // Verify the token with a minimal live model call before persisting, so a
+      // bad/expired token is rejected here instead of failing mid-review.
+      await invoke('verify_token', { token: t });
       await invoke('save_token', { token: t });
       setToken('');
       setStatus({ tone: 'ok', text: 'Token saved. Your model is connected.' });

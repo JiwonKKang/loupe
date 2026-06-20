@@ -322,19 +322,36 @@ export default function ReviewScreen(props) {
   const topPad = offsets[startIdx] || 0;
   const bottomPad = Math.max(0, totalH - (offsets[endIdx] || totalH));
 
-  // Measuring ref factory: stores the item's offsetHeight at its global index and
-  // bumps measureTick only when the height actually changed (> 0.5px). This guard
-  // is what makes measurement converge instead of looping: once a row's stored
-  // height matches its rendered height (within 0.5px) the callback is a no-op, so
-  // it triggers no further render — measurement reaches a fixed point.
-  const measure = (gi) => (el) => {
-    if (!el) return;
-    const h = el.offsetHeight;
-    if (Math.abs((rowH.current[gi] || 0) - h) > 0.5) {
-      rowH.current[gi] = h;
-      setMeasureTick((t) => t + 1);
+  // Measuring ref, stabilized per global index. A NEW ref callback identity each
+  // render makes React detach (call with null) then re-attach (call with the node)
+  // every render — during a thread's enter animation that's a churn of ref calls,
+  // each re-measuring and (when the height shifts) bumping measureTick: a render
+  // burst. Caching one callback per `gi` keeps ref identity stable across renders,
+  // so React leaves the ref attached and the callback fires only on real mount/
+  // unmount or resize — not on every re-render.
+  //
+  // The body still bumps measureTick only when the height actually changed (> 0.5px).
+  // That guard is what makes measurement converge instead of looping: once a row's
+  // stored height matches its rendered height (within 0.5px) the callback is a
+  // no-op, so it triggers no further render — measurement reaches a fixed point.
+  // `rowH` (a ref) and `setMeasureTick` (a state setter) are stable, so a cached
+  // closure stays correct for the life of the component.
+  const measureCbs = React.useRef(new Map());
+  const measure = React.useCallback((gi) => {
+    let cb = measureCbs.current.get(gi);
+    if (!cb) {
+      cb = (el) => {
+        if (!el) return;
+        const h = el.offsetHeight;
+        if (Math.abs((rowH.current[gi] || 0) - h) > 0.5) {
+          rowH.current[gi] = h;
+          setMeasureTick((t) => t + 1);
+        }
+      };
+      measureCbs.current.set(gi, cb);
     }
-  };
+    return cb;
+  }, []);
 
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"

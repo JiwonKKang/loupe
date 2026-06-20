@@ -365,7 +365,7 @@ export default function App() {
           <ProjectMenu
             project={repoPath} base={base} target={target}
             branches={undefined} recents={undefined}
-            onChangeProject={changeProject} defaultOpen />
+            onChangeProject={changeProject} defaultOpen pinned />
           <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
             alignItems: 'center', justifyContent: 'center', gap: 10, padding: 24, textAlign: 'center',
             pointerEvents: 'none' }}>

@@ -475,6 +475,7 @@ fn fold_layout_sets_per_card_ai_summary_from_the_map() {
         card_summaries: [("a".to_string(), "a 카드가 무엇을 하는지".to_string())]
             .into_iter()
             .collect(),
+        fallback: false,
     };
 
     let shas = DiffShas { merge_base_sha: "mb".into(), head_sha: "hd".into() };
@@ -486,4 +487,150 @@ fn fold_layout_sets_per_card_ai_summary_from_the_map() {
     assert_eq!(b.ai_summary, None, "b without a summary stays None (Optional — no B1 impact)");
     // The statistical card summary (B1) is untouched on both.
     assert!(!a.summary.is_empty() && !b.summary.is_empty(), "B1: statistical summary intact");
+}
+
+// ===========================================================================
+// ⑩ Layer-heuristic fallback (planning §9) — build_fallback_layout + fold_layout signal
+// ===========================================================================
+
+/// A card whose single member's `name` carries the path/layer marker the heuristic reads
+/// (the fallback's `layer_rank` matches on the member name when no Stage-1 path is threaded).
+fn layer_card(seed_id: &str, card_id: &str, marker_name: &str) -> ClusterCardInput {
+    ClusterCardInput {
+        cluster_id: seed_id.to_string(),
+        algorithmic_type_hint: ClusterKind::Flow,
+        entrypoint_candidates: vec![],
+        changed_symbols: vec![ChangedSymbolIn {
+            card_id: card_id.to_string(),
+            name: marker_name.to_string(),
+            kind: SymbolKind::Function,
+            change_type: ChangeType::Modified,
+            summary: format!("Updates {marker_name}."),
+            snippet: format!("+// {marker_name}"),
+            renamed_from: None,
+            signature_change: None,
+        }],
+        relation_hints: RelationHints::default(),
+        contracts_changed: vec![],
+        related_tests: vec![],
+        deleted_symbols: vec![],
+        rename_pairs: vec![],
+        signature_changes: vec![],
+    }
+}
+
+#[test]
+fn fallback_layout_orders_clusters_by_layer_and_keeps_every_card() {
+    // Seeds deliberately fed OUT of review order: test, repository, controller, service,
+    // domain. The fallback must reorder them controller→service→domain→repository→test and
+    // keep every card id exactly once (no-drop §3.1).
+    let cards = vec![
+        layer_card("seed-t", "card-test", "src/order/order_test.rs"),
+        layer_card("seed-r", "card-repo", "src/order/OrderRepository.java"),
+        layer_card("seed-c", "card-ctrl", "src/order/OrderController.java"),
+        layer_card("seed-s", "card-svc", "src/order/OrderService.java"),
+        layer_card("seed-d", "card-dom", "src/order/domain/OrderPolicy.java"),
+    ];
+
+    let layout = super::build_fallback_layout(&cards);
+
+    // The deterministic layer order: controller → service → domain → repository → test.
+    assert_eq!(
+        layout.cluster_order,
+        vec![
+            "seed-c".to_string(),
+            "seed-s".to_string(),
+            "seed-d".to_string(),
+            "seed-r".to_string(),
+            "seed-t".to_string(),
+        ],
+        "clusters ordered by review layer (controller→service→domain→repository→test)"
+    );
+    // Flat order mirrors the cluster order (one card each), every id present exactly once.
+    assert_eq!(
+        layout.ordered_card_ids,
+        vec![
+            "card-ctrl".to_string(),
+            "card-svc".to_string(),
+            "card-dom".to_string(),
+            "card-repo".to_string(),
+            "card-test".to_string(),
+        ],
+        "every whitelisted card appears once, in layer order"
+    );
+    // No-drop: the flat order is a permutation of all 5 input card ids (none lost/duplicated).
+    let mut got: Vec<&str> = layout.ordered_card_ids.iter().map(String::as_str).collect();
+    got.sort();
+    assert_eq!(got, vec!["card-ctrl", "card-dom", "card-repo", "card-svc", "card-test"]);
+    assert!(layout.unclustered.is_empty(), "fallback puts every seed in a cluster");
+    // ⑩ signal: the layout is flagged fallback so fold_layout reports AnalysisState::Fallback.
+    assert!(layout.fallback, "fallback builder sets fallback = true");
+    // B1 parity: every cluster has a non-empty title + summary even with no AI.
+    for c in &layout.clusters {
+        assert!(!c.title.trim().is_empty(), "cluster {} has a title", c.id);
+        assert!(!c.summary.trim().is_empty(), "cluster {} has a summary", c.id);
+    }
+    // Determinism: building twice yields a byte-identical layout.
+    let again = super::build_fallback_layout(&cards);
+    assert_eq!(
+        serde_json::to_string(&layout).unwrap(),
+        serde_json::to_string(&again).unwrap(),
+        "fallback builder is deterministic"
+    );
+}
+
+#[test]
+fn fallback_layout_sorts_members_inside_a_cluster_by_layer() {
+    // A single multi-symbol seed (e.g. a strong-relation chain) whose members span layers,
+    // fed scrambled. The intra-cluster order must come out layer-sorted, and all 3 ids appear.
+    let card = ClusterCardInput {
+        cluster_id: "seed-1".into(),
+        algorithmic_type_hint: ClusterKind::Flow,
+        entrypoint_candidates: vec![],
+        changed_symbols: vec![
+            // repository (layer 3), controller (layer 0), service (layer 1) — out of order.
+            sym("r", "OrderRepository"),
+            sym("c", "OrderController"),
+            sym("s", "OrderService"),
+        ],
+        relation_hints: RelationHints::default(),
+        contracts_changed: vec![],
+        related_tests: vec![],
+        deleted_symbols: vec![],
+        rename_pairs: vec![],
+        signature_changes: vec![],
+    };
+
+    let layout = super::build_fallback_layout(&[card]);
+    assert_eq!(layout.clusters.len(), 1);
+    assert_eq!(
+        layout.clusters[0].ordered_card_ids,
+        vec!["c".to_string(), "s".to_string(), "r".to_string()],
+        "members sorted controller→service→repository inside the cluster"
+    );
+    assert_eq!(layout.ordered_card_ids.len(), 3, "every member appears once");
+    assert!(layout.fallback);
+}
+
+#[test]
+fn fold_layout_maps_fallback_flag_to_analysis_state() {
+    use super::model::{AnalysisState, ReviewCard};
+    use super::{fold_layout, DiffShas, ReviewData};
+
+    let mut review = ReviewData {
+        cards: vec![ReviewCard { id: "a".into(), summary: "Updates a.".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    // A fallback-flagged layout (what build_fallback_layout produces).
+    let layout = super::build_fallback_layout(&[card("seed-1", &[("a", "create")])]);
+    assert!(layout.fallback);
+
+    let shas = DiffShas { merge_base_sha: "mb".into(), head_sha: "hd".into() };
+    fold_layout(&mut review, layout, shas);
+
+    assert_eq!(
+        review.analysis,
+        AnalysisState::Fallback,
+        "a fallback layout ⇒ analysis === 'fallback' (front-end banner)"
+    );
 }

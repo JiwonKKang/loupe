@@ -91,6 +91,41 @@ fn clear_token(app: AppHandle) -> Result<(), String> {
     }
 }
 
+/// Verify a model setup-token by making one minimal live call through the `claude` CLI.
+///
+/// `validate_token` runs first (whitespace / non-ASCII / empty rejected, same rules as
+/// `save_token` / `analyze_review`). On success we build a `CliProvider` and issue a single
+/// tiny `Fast` (Haiku) completion — "reply with OK" — so a bad/expired token surfaces here as a
+/// human-readable error instead of mid-pipeline. `max_tokens` is small and `json_schema` is
+/// `None` to keep the round-trip cheap. The token is moved straight into the provider and
+/// **never logged** (the provider passes it to the child via env, never on argv). Returns
+/// `Ok(())` on any successful completion; the actual answer text is irrelevant.
+#[tauri::command]
+async fn verify_token(token: String) -> Result<(), String> {
+    use engine::ai::{CompletionRequest, LlmProvider, ModelTier};
+
+    let token = validate_token(&token)?;
+
+    let provider = engine::ai::cli::CliProvider::new(token);
+
+    let req = CompletionRequest {
+        system: "reply with OK".to_string(),
+        user: "ping".to_string(),
+        max_tokens: 16,
+        json_schema: None,
+        tier: ModelTier::Fast,
+        temperature: 0.0,
+    };
+
+    // Map the coarse LlmError to a human-readable string. The token is never part of the
+    // error (LlmError carries only status/body snippets, never credentials).
+    provider
+        .complete(req)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("could not reach the model: {e}"))
+}
+
 /// Re-emits engine pipeline milestones over the `analyze://progress` Tauri event so the
 /// front-end `AnalyzeScreen` can mirror the real stages live. Holds a clone of the app handle;
 /// `emit` is best-effort (a dropped event only affects the loader, never the result).
@@ -181,6 +216,7 @@ pub fn run() {
             load_review,
             analyze_review,
             list_branches,
+            verify_token,
             save_token,
             load_token,
             clear_token

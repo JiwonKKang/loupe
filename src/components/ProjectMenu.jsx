@@ -81,9 +81,20 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
 
 export default function ProjectMenu({
   project, base, target, branches: branchesProp, recents: recentsProp,
-  onChangeProject, onBrowse, defaultOpen = false,
+  onChangeProject, onBrowse, defaultOpen = false, pinned = false,
 }) {
-  const [open_, setOpen] = React.useState(!!defaultOpen);
+  // `pinned` (used by App's pickProject shell, where there is no project yet):
+  // the menu must stay open — outside-click never closes it and the trigger
+  // can't toggle it shut. The empty canvas behind it has nothing to fall back
+  // to, so a stray click on it shouldn't dismiss the only way to start a review.
+  const [open_, setOpenRaw] = React.useState(!!defaultOpen || !!pinned);
+  // When pinned, swallow any close request (false); open requests still pass.
+  const setOpen = React.useCallback((next) => {
+    setOpenRaw((prev) => {
+      const v = typeof next === 'function' ? next(prev) : next;
+      return pinned ? true : v;
+    });
+  }, [pinned]);
   const [hover, setHover] = React.useState(false);
   const ref = React.useRef(null);
 
@@ -121,15 +132,20 @@ export default function ProjectMenu({
     if (Array.isArray(branchesProp)) setBranches(branchesProp);
   }, [project, base, target, branchesProp, open_]);
 
-  // Outside-click closes the panel (but never while it's the auto-opened picker
-  // shell with no project chosen — App keeps that one open via defaultOpen, and
-  // closing it is still fine since there's a center hint behind it).
+  // Keep the panel open while pinned (e.g. pickProject), even if it was never
+  // toggled — covers a parent flipping `pinned` true after mount.
+  React.useEffect(() => { if (pinned) setOpenRaw(true); }, [pinned]);
+
+  // Outside-click closes the panel — EXCEPT when pinned: the pickProject shell
+  // has only an empty canvas behind the menu, so a stray click there must not
+  // dismiss the only entry point to a review. (When pinned, `setOpen(false)`
+  // already no-ops, but we also skip binding the listener so it's truly inert.)
   React.useEffect(() => {
-    if (!open_) return;
+    if (!open_ || pinned) return;
     const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
-  }, [open_]);
+  }, [open_, pinned, setOpen]);
 
   const Ico = ({ d, w = 14 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"

@@ -290,6 +290,14 @@ pub struct ClusterLayout {
     /// a deterministic, byte-stable serialization (§8.1).
     #[serde(default)]
     pub card_summaries: std::collections::BTreeMap<String, String>,
+    /// ⑩ Fallback signal (planning §9): `true` when this layout was produced by the
+    /// deterministic layer-heuristic fallback ([`build_fallback_layout`]) because the AI cluster
+    /// pipeline failed, NOT by the AI. `fold_layout` reads it to set
+    /// `analysis = AnalysisState::Fallback` (front-end shows the `'fallback'` banner) instead of
+    /// `Done`. `#[serde(default)]` ⇒ `false` for any AI/cache-stored layout (which never sets it),
+    /// so existing cached layouts deserialize as non-fallback (`Done`).
+    #[serde(default)]
+    pub fallback: bool,
 }
 
 /// Stage-③→④→⑤→⑥ entry point: refine the Stage-② analysis into AI cluster cards, then run
@@ -443,7 +451,14 @@ fn fold_layout(review: &mut ReviewData, layout: ClusterLayout, shas: gitdiff::Di
     review.split_suggestions = layout.split_suggestions;
     review.head_sha = shas.head_sha;
     review.base_sha = shas.merge_base_sha;
-    review.analysis = AnalysisState::Done;
+    // ⑩ A layout flagged `fallback` came from the deterministic layer-heuristic builder (the AI
+    // pipeline failed) — surface that to the front-end (`analysis === 'fallback'` banner) rather
+    // than claiming a verified AI run. A normal AI/cache layout (`fallback == false`) ⇒ Done.
+    review.analysis = if layout.fallback {
+        AnalysisState::Fallback
+    } else {
+        AnalysisState::Done
+    };
 }
 
 /// ⑦ **Cached** Stage-③→⑥ entry point (planning §8.1/§8.2/§8.4; v2-critique M2/M3).
@@ -481,7 +496,14 @@ pub async fn analyze_clusters_cached(
     let analysis = analyze_relations(repo_path, base, target)?;
     let cards = build_all_cluster_cards(&review, &analysis);
 
-    let layout = run_cluster_pipeline_cached(
+    // ⑩ AI failure → layer-heuristic fallback (planning §9). When the AI pipeline `Err`s
+    // (call/timeout/parse failure, over-budget, or verify-then-retry exhausted), we do NOT
+    // propagate the error: we degrade to the deterministic, "엉성하지만 항상 동작하는"
+    // [`build_fallback_layout`] (strong seeds as clusters, layer-heuristic ordering). The
+    // fallback layout is **never cached** (its `fallback` flag stays out of the cache; the next
+    // open re-runs the AI so a transient failure isn't frozen into the SHA cache, §8.2 / parity
+    // with `layout_is_cacheable`).
+    let layout = match run_cluster_pipeline_cached(
         provider,
         cache,
         repo_path,
@@ -491,15 +513,21 @@ pub async fn analyze_clusters_cached(
         progress,
     )
     .await
-    .map_err(|e| EngineError::Parse(format!("AI cluster pipeline failed: {e}")))?;
-
-    // Store the assembled head layout so a re-open is the AI-0-call path — but ONLY if its
-    // labels actually succeeded. A layout with a fallen-back cluster label is a transient
-    // failure; caching it would freeze "변경 사항" and serve it on every re-open (§ see
-    // `layout_is_cacheable`). On a fallen-back layout we skip the cache so the next open re-runs.
-    if layout_is_cacheable(&layout) {
-        let _ = cache.put_layout(repo_path, &shas.merge_base_sha, &shas.head_sha, &layout);
-    }
+    {
+        Ok(layout) => {
+            // Store the assembled head layout so a re-open is the AI-0-call path — but ONLY if
+            // its labels actually succeeded. A layout with a fallen-back cluster label is a
+            // transient failure; caching it would freeze "변경 사항" and serve it on every re-open
+            // (§ see `layout_is_cacheable`). On a fallen-back layout we skip the cache so the next
+            // open re-runs.
+            if layout_is_cacheable(&layout) {
+                let _ = cache.put_layout(repo_path, &shas.merge_base_sha, &shas.head_sha, &layout);
+            }
+            layout
+        }
+        // The whole AI pipeline failed — degrade to the deterministic fallback (NOT cached).
+        Err(_e) => build_fallback_layout(&cards),
+    };
     Ok(layout)
 }
 
@@ -876,6 +904,8 @@ fn assemble_layout(
         merge_suggestions: labels.labels.merge_suggestions.iter().map(to_suggestion("merge")).collect(),
         split_suggestions: labels.labels.split_suggestions.iter().map(to_suggestion("split")).collect(),
         card_summaries,
+        // AI-assembled layout — never the fallback. The ⑩ fallback builder sets this true.
+        fallback: false,
     }
 }
 
@@ -887,6 +917,245 @@ fn to_suggestion(kind: &'static str) -> impl Fn(&ai::steps::SuggestionOut) -> Su
         reason: s.reason.clone(),
     }
 }
+
+// ===========================================================================
+// ⑩ Layer-heuristic fallback layout (planning §9 — "엉성하지만 항상 동작")
+// ===========================================================================
+//
+// When the AI cluster pipeline fails (call/timeout/parse, over-budget, verify-then-retry
+// exhausted) we must NOT die — we degrade to a deterministic layout (§9.2: 1차 fallback =
+// 파일경로 + 레이어 휴리스틱 정렬 controller→service→domain→repository→infra→test; DFS는 2차).
+//
+// Inputs are exactly the prepared `ClusterCardInput`s the AI would have received — each one
+// already a **strong-seed** (or a file seed), with a stable `cluster_id` and its member
+// `card_id`s. We reuse those seeds verbatim as the clusters (the strong relations the seeds
+// encode are already "확실하게 묶을 수 있는" groupings — §9.3/v2.1), and only impose a
+// deterministic order via the layer heuristic. No AI, no network, pure.
+//
+// Invariants kept (parity with the AI path):
+//  - **no-drop / 결정성**: every whitelisted card id appears exactly once in `ordered_card_ids`.
+//  - **fallback signal**: `fallback = true` ⇒ `fold_layout` sets `analysis = Fallback`.
+//  - the layout is **not cacheable in practice** (the caller never caches a fallback), so a
+//    later successful AI run regenerates the real layout.
+
+/// Architectural layers in review-flow order (planning §1 / §9.2). A card's rank is the layer
+/// it best matches by file path + symbol name; lower rank = earlier in the review flow.
+/// `Other` (no match) sorts between `domain` and `repository` heuristics — see [`layer_rank`].
+const LAYER_COUNT: usize = 7;
+
+/// Map a (path, name) to a layer rank 0..LAYER_COUNT (planning §9.2 controller→…→test).
+/// Pure name/path heuristic (lower-cased substring match), deliberately coarse — the goal is a
+/// "그럴듯한" deterministic order, not a precise call graph. Order of the checks encodes
+/// precedence (entrypoint markers win over generic ones):
+///  0 controller/handler/route/api/endpoint/`main`/entrypoint
+///  1 service/usecase/use_case/application/app-service
+///  2 domain/model/entity/policy/aggregate/valueobject
+///  3 repository/repo/dao/store/persistence/mapper
+///  4 infra/config/client/gateway/adapter/migration/build/ci
+///  5 test/spec/__tests__
+///  6 everything else (Other) — trails the named layers but precedes nothing special
+fn layer_rank(path: &str, name: &str) -> usize {
+    let p = path.to_ascii_lowercase();
+    let n = name.to_ascii_lowercase();
+    // test first: a test file/symbol is a test regardless of what else its path says.
+    if p.contains("/test/")
+        || p.contains("/tests/")
+        || p.contains("/__tests__/")
+        || p.contains("_test.")
+        || p.contains("test_")
+        || p.ends_with("_test.go")
+        || p.contains(".test.")
+        || p.contains(".spec.")
+        || n.starts_with("test")
+        || n.ends_with("test")
+        || n.ends_with("tests")
+        || n.ends_with("spec")
+    {
+        return 5;
+    }
+    let any = |hay: &str, needles: &[&str]| needles.iter().any(|x| hay.contains(x));
+    // 0 — controller / handler / route / api / entrypoint.
+    if any(&p, &["controller", "handler", "/routes/", "/route/", "/api/", "/endpoints/", "router"])
+        || any(&n, &["controller", "handler"])
+        || n == "main"
+        || n.starts_with("handle")
+    {
+        return 0;
+    }
+    // 1 — service / usecase / application.
+    if any(&p, &["service", "usecase", "use_case", "/application/", "app_service"])
+        || any(&n, &["service", "usecase"])
+    {
+        return 1;
+    }
+    // 2 — domain / model / entity / policy.
+    if any(&p, &["/domain/", "domain", "/model", "entity", "policy", "aggregate", "valueobject"])
+        || any(&n, &["policy", "entity", "aggregate"])
+    {
+        return 2;
+    }
+    // 3 — repository / dao / store / persistence.
+    if any(&p, &["repository", "/repo", "dao", "/store", "persistence", "mapper"])
+        || any(&n, &["repository", "repo", "dao"])
+    {
+        return 3;
+    }
+    // 4 — infra / config / client / gateway / migration / build / ci.
+    if any(
+        &p,
+        &[
+            "infra", "/config", "config.", "client", "gateway", "adapter", "migration", ".sql",
+            "/.github/", "dockerfile", "caddyfile", ".toml", ".yaml", ".yml",
+        ],
+    ) || any(&n, &["client", "gateway", "adapter", "config"])
+    {
+        return 4;
+    }
+    // 6 — unclassified (trails the named non-test layers, precedes tests already handled above).
+    LAYER_COUNT - 1
+}
+
+/// A card's layer rank = the **minimum** layer rank over its member symbols (the earliest
+/// review layer any of its members touches). Empty cards (defensive) rank `Other`.
+fn card_layer_rank(card: &clustercard::ClusterCardInput) -> usize {
+    card.changed_symbols
+        .iter()
+        .map(|s| layer_rank(card_path_of(card, s), &s.name))
+        .min()
+        .unwrap_or(LAYER_COUNT - 1)
+}
+
+/// A member symbol's path: the file-seed cards carry the path in `name`; symbol cards carry no
+/// path on the `ChangedSymbolIn` (the path lives on the Stage-1 card, not here), so we fall back
+/// to the symbol name for the path-based checks. Both feed `layer_rank` together with the name.
+fn card_path_of<'a>(
+    _card: &'a clustercard::ClusterCardInput,
+    sym: &'a clustercard::ChangedSymbolIn,
+) -> &'a str {
+    // For file seeds the `name` *is* the path; for symbol seeds `name` is the bare symbol — in
+    // both cases passing it as the "path" to `layer_rank` (alongside the name) is the cheapest
+    // signal available here without re-threading the Stage-1 cards. The name-based checks in
+    // `layer_rank` cover symbol cards; the path-based checks cover file cards.
+    sym.name.as_str()
+}
+
+/// The deterministic layer-heuristic fallback (planning §9.2). Each input `ClusterCardInput` is
+/// one strong seed (or file seed) → one cluster, ordered by layer then path; the card ids inside
+/// each cluster are likewise layer-then-path sorted. Pure, no AI, no network.
+///
+/// `fallback = true` so `fold_layout` reports `AnalysisState::Fallback`. Every whitelisted card
+/// id appears exactly once across the clusters (no-drop §3.1); there is no Unclustered bucket
+/// here (every seed becomes a real cluster, however small) so nothing is lost.
+fn build_fallback_layout(cards: &[clustercard::ClusterCardInput]) -> ClusterLayout {
+    // Sort the seeds (clusters) by (min layer rank, representative path/name) for a stable,
+    // review-sensible order. A seed's representative key is its lexicographically-smallest member
+    // name so identical input ⇒ identical output (결정성).
+    let mut order: Vec<usize> = (0..cards.len()).collect();
+    order.sort_by(|&i, &j| {
+        let (ci, cj) = (&cards[i], &cards[j]);
+        card_layer_rank(ci)
+            .cmp(&card_layer_rank(cj))
+            .then_with(|| cluster_sort_key(ci).cmp(&cluster_sort_key(cj)))
+            .then_with(|| ci.cluster_id.cmp(&cj.cluster_id))
+    });
+
+    let mut clusters: Vec<Cluster> = Vec::with_capacity(cards.len());
+    let mut cluster_order: Vec<String> = Vec::with_capacity(cards.len());
+    let mut flat: Vec<String> = Vec::new();
+    // Guard the no-drop invariant: a card id is emitted at most once even if (defensively) it
+    // appeared in two seeds.
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for &i in &order {
+        let card = &cards[i];
+
+        // Intra-cluster order: members sorted by (layer rank, name) — same heuristic, finer grain.
+        let mut members: Vec<&clustercard::ChangedSymbolIn> = card.changed_symbols.iter().collect();
+        members.sort_by(|a, b| {
+            layer_rank(card_path_of(card, a), &a.name)
+                .cmp(&layer_rank(card_path_of(card, b), &b.name))
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.card_id.cmp(&b.card_id))
+        });
+        let mut ordered_card_ids: Vec<String> = Vec::with_capacity(members.len());
+        for m in members {
+            if seen.insert(m.card_id.clone()) {
+                ordered_card_ids.push(m.card_id.clone());
+            }
+        }
+        // A seed whose every member was already emitted (defensive) contributes no cluster.
+        if ordered_card_ids.is_empty() {
+            continue;
+        }
+        flat.extend(ordered_card_ids.iter().cloned());
+
+        clusters.push(Cluster {
+            id: card.cluster_id.clone(),
+            title: fallback_title(card),
+            // Generic, honest summary — no AI ran, so we don't pretend to summarize intent.
+            summary: FALLBACK_SUMMARY_KR.to_string(),
+            kind: card.algorithmic_type_hint,
+            type_hint: card.algorithmic_type_hint,
+            ordered_card_ids,
+        });
+        cluster_order.push(card.cluster_id.clone());
+    }
+
+    ClusterLayout {
+        clusters,
+        cluster_order,
+        ordered_card_ids: flat,
+        // The fallback puts every seed into a cluster, so the Unclustered bucket is empty.
+        unclustered: Vec::new(),
+        merge_suggestions: Vec::new(),
+        split_suggestions: Vec::new(),
+        card_summaries: std::collections::BTreeMap::new(),
+        // ⑩ the fallback signal — `fold_layout` turns this into `AnalysisState::Fallback`.
+        fallback: true,
+    }
+}
+
+/// The honest fallback cluster summary (no AI ran). Korean, parity with the labelling fallback.
+const FALLBACK_SUMMARY_KR: &str = "자동 분석에 실패하여 파일 경로·레이어 기준으로 묶은 변경 사항입니다.";
+
+/// A seed's deterministic sort key: its lexicographically smallest member name (display).
+fn cluster_sort_key(card: &clustercard::ClusterCardInput) -> String {
+    card.changed_symbols
+        .iter()
+        .map(|s| s.name.clone())
+        .min()
+        .unwrap_or_default()
+}
+
+/// Heuristic cluster title (no AI): the seed's representative symbol name, or the common file /
+/// directory for a multi-member seed. Single member ⇒ that member's name; several members in one
+/// file ⇒ the file's basename; otherwise the smallest member name. Never empty (B1 parity).
+fn fallback_title(card: &clustercard::ClusterCardInput) -> String {
+    let names: Vec<&str> = card.changed_symbols.iter().map(|s| s.name.as_str()).collect();
+    match names.as_slice() {
+        [] => FALLBACK_TITLE_KR.to_string(),
+        [only] => basename(only).to_string(),
+        _ => {
+            // Several members: prefer a shared file basename (file seeds set name=path), else the
+            // smallest member name as a stable representative.
+            let basenames: std::collections::BTreeSet<&str> =
+                names.iter().map(|n| basename(n)).collect();
+            if basenames.len() == 1 {
+                basenames.into_iter().next().unwrap_or(FALLBACK_TITLE_KR).to_string()
+            } else {
+                names.iter().min().copied().unwrap_or(FALLBACK_TITLE_KR).to_string()
+            }
+        }
+    }
+}
+
+/// The last path segment of a `name`/path (`a/b/c.rs` → `c.rs`, a bare symbol → itself).
+fn basename(s: &str) -> &str {
+    s.rsplit('/').next().unwrap_or(s)
+}
+
+/// Fallback title when a seed has no usable member name (defensive). Korean (B1 parity).
+const FALLBACK_TITLE_KR: &str = "변경 사항";
 
 /// Heuristic test detection (planning: test→impl strong relation). Name/path based and
 /// deliberately coarse — language test conventions, no annotation parsing this stage:
