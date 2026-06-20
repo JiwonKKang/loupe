@@ -106,8 +106,8 @@ impl LlmProvider for CountingProvider {
                 *s
             };
             let cluster_ids = label_cluster_ids(&req.user);
-            // Per-cluster member card ids (for the cardSummaries reply). label_one is a single-
-            // cluster call, but build per-cluster to stay correct for batched calls too.
+            // Per-cluster member card ids (for the cardSummaries reply). Stage-⑥ is now ONE
+            // batched call covering every cluster, so we answer all clusters the request carried.
             let members = label_member_ids_by_cluster(&req.user);
             let clusters: Vec<Value> = cluster_ids
                 .iter()

@@ -43,7 +43,30 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Symbol-count threshold below which a PR is "small". At or below this, clustering +
 /// ordering merge into one AI call (planning §4.1 latency branch); above it, the two
 /// stages run as separate calls so each output stays small and easy to verify/retry.
+///
+/// Retained for the original §4.1 latency-branch vocabulary and back-compat tests, but it is
+/// **no longer the pipeline's combine/split switch** — that is now [`COMBINED_MAX_SYMBOLS`]
+/// (the combined call is the default path for small *and* medium PRs; see
+/// [`combined_fits`]). Kept as a documented label of "small" rather than dead-code.
 pub const SMALL_PR_SYMBOLS: usize = 12;
+
+/// Upper bound (in changed symbols) on running ④+⑤ as ONE combined `cluster_and_order_combined`
+/// call. The combined call is the **default** path for small *and* medium PRs so a cache-miss
+/// analysis is `④⑤(1) + ⑥(1) = 2` AI calls; only a genuinely large PR (symbol count above this)
+/// splits ④⑤ into two calls so each output stays small/verifiable (`= 3` calls then).
+///
+/// Budget rationale (why 48, not "as big as possible"): the combined call is capped at
+/// [`COMBINED_MAX_TOKENS`] = 4096 *output* tokens, and its output is one `memberCardIds` entry +
+/// one `clusterId` per cluster plus the `clusterOrder` — i.e. roughly **one short id string per
+/// changed symbol, twice** (once in a cluster, once implied by order), as JSON. At ~10–15 output
+/// tokens per id-with-JSON-punctuation, 48 symbols ⇒ ~700–1000 output tokens for the structure,
+/// comfortably inside 4096 with headroom for cluster wrappers/kinds and the model's slack. The
+/// *input* side (seed cards, no diff bodies — Stage-③ input-size defence) scales with symbol
+/// count too; 48 keeps the single prompt well within a Sonnet context with the system prompt and
+/// schema. Above 48 the truncation/verify-retry risk on a single mega-output outweighs the
+/// 1-call latency win, so we pay the extra call and split. (Conservative; tune up only with
+/// evidence of clean combined runs at higher counts.)
+pub const COMBINED_MAX_SYMBOLS: usize = 48;
 
 /// Max tokens for the clustering call. Output is small (id lists + a kind enum), so this
 /// is generous headroom, not a real limit.
@@ -171,12 +194,34 @@ pub struct LabelResult {
     pub split_suggestions: Vec<SuggestionOut>,
 }
 
-/// Whether this PR takes the small-PR latency branch (planning §4.1): when the total
-/// changed-symbol count is ≤ [`SMALL_PR_SYMBOLS`], clustering and ordering are done in one
-/// AI call (`cluster_and_order_combined`); above it, the two calls stay separate.
+/// Total changed-symbol count across the input cards (the clustering whitelist size). Both
+/// the (legacy) "small PR" label and the (current) combine/split switch derive from it.
+fn total_symbols(cards: &[ClusterCardInput]) -> usize {
+    cards.iter().map(|c| c.changed_symbols.len()).sum()
+}
+
+/// Whether this PR is "small" by the original §4.1 latency label (≤ [`SMALL_PR_SYMBOLS`]).
+///
+/// **Note**: this is *no longer* the pipeline's combine/split switch — see [`combined_fits`].
+/// The combined ④+⑤ call is now the default for small *and* medium PRs; this predicate is kept
+/// for the §4.1 vocabulary and the existing back-compat unit test (`#[allow(dead_code)]` so the
+/// retained-for-tests helper doesn't warn in the non-test lib build).
+#[allow(dead_code)]
 pub fn is_small_pr(cards: &[ClusterCardInput]) -> bool {
-    let symbols: usize = cards.iter().map(|c| c.changed_symbols.len()).sum();
-    symbols <= SMALL_PR_SYMBOLS
+    total_symbols(cards) <= SMALL_PR_SYMBOLS
+}
+
+/// Whether ④+⑤ should run as ONE combined call (the default) rather than split into two.
+///
+/// True when the total changed-symbol count is ≤ [`COMBINED_MAX_SYMBOLS`]: small and medium PRs
+/// take the combined path so a cache-miss analysis is `④⑤(1) + ⑥(1) = 2` AI calls. A genuinely
+/// large PR (count above the bound) returns `false` so the orchestrator splits ④⑤ into
+/// `cluster_step` + `order_step` (each output small/verifiable) — the `= 3`-call path. The
+/// orchestrator *also* falls back to the split path if a combined call returns a length/parse
+/// error even when this predicate is true (a truncated mega-output); see
+/// [`crate::engine::run_cluster_pipeline`].
+pub fn combined_fits(cards: &[ClusterCardInput]) -> bool {
+    total_symbols(cards) <= COMBINED_MAX_SYMBOLS
 }
 
 /// Run the AI clustering (seed-correction) step.
@@ -563,6 +608,15 @@ pub async fn label_step(
 /// Never fails: on a provider or parse error after one retry it returns the B1 fallback label
 /// so a single flaky cluster can't sink the whole pipeline. Returns the verified (non-empty)
 /// label plus this cluster's M4-suspicious tokens (empty when the text is clean).
+///
+/// **No longer on the hot path, and not currently called anywhere.** Stage-⑥ now runs ONE
+/// batched [`label_step`] for all clusters (the 2-call target), so the orchestrator never fans
+/// this out per cluster. Retained for the single-cluster scoping it provides — a future streaming
+/// variant or a targeted re-label could reuse it — but it has no caller (and no test of its own;
+/// the batched [`label_step`] is what the pipeline tests exercise). `#[allow(dead_code)]` so the
+/// unused function doesn't warn while remaining a public part of the steps API. (Remove it if no
+/// streaming/re-label use materializes.)
+#[allow(dead_code)]
 pub async fn label_one(
     provider: &dyn LlmProvider,
     cluster: &LabelInput,

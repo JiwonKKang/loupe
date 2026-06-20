@@ -1,10 +1,14 @@
 //! Stage-④→⑤→⑥ orchestration tests for [`super::run_cluster_pipeline`].
 //!
 //! A sequenced mock provider feeds canned AI replies so the whole pipeline
-//! (cluster → order → label, or the small-PR combined call) is exercised without a
-//! network or git. Assertions cover:
-//!  - the **small-PR branch** clusters + orders in ONE call, then labels (2 calls total),
-//!  - the **big-PR branch** runs three calls (cluster, order, label),
+//! (combined ④⑤ → batched ⑥, or the split cluster → order → label path) is exercised without a
+//! network or git. The AI is now **2 calls fixed** on a cache miss: ④⑤ combined (1) + ⑥ batched
+//! label (1); only a genuinely large PR (symbols > `COMBINED_MAX_SYMBOLS`) or a combined
+//! length/parse error splits ④⑤ into 3 calls. Assertions cover:
+//!  - the **small/medium PR** clusters + orders in ONE combined call, then ONE batched label
+//!    (2 calls total),
+//!  - the **large PR (> COMBINED_MAX_SYMBOLS)** splits into three calls (cluster, order, label),
+//!  - the **combined parse-error** path degrades to the split path (no error to the caller),
 //!  - the assembled [`super::ClusterLayout`] has the inter-cluster order, each cluster's
 //!    ordered members + filled title/summary/kind, the flat `ordered_card_ids`, and the
 //!    unclustered bucket trailing last,
@@ -23,10 +27,10 @@ use std::sync::Mutex;
 /// A mock provider that returns canned JSON replies and counts calls.
 ///
 /// Clustering / ordering / combined calls are served from a FIFO `replies` queue (one per
-/// call, in order). **Labelling is content-addressed**: Stage-⑥ now labels each cluster on its
-/// own call (`label_one`), bounded-concurrent, so the queue order can't map a reply to the
-/// right cluster. Instead, a label call is detected by its system prompt and answered from the
-/// `labels` map keyed by the cluster id in the request — concurrency-safe and deterministic.
+/// call, in order). **Labelling is content-addressed**: Stage-⑥ now labels **all** clusters in
+/// ONE batched `label_step` call, so the reply must cover every `clusters[*].clusterId` in the
+/// request. A label call is detected by its system prompt and answered from the `labels` map
+/// keyed by each cluster id — order-independent and deterministic.
 struct SeqProvider {
     replies: Mutex<std::collections::VecDeque<Value>>,
     labels: HashMap<String, (String, String)>,
@@ -53,26 +57,32 @@ impl SeqProvider {
     }
 }
 
-/// The first cluster id in a (single-cluster) label request body.
-fn first_cluster_id(user: &str) -> String {
+/// Every `(clusterId, [memberCardId])` pair in a **batched** label request body —
+/// `clusters[*].clusterId` with `clusters[*].changedSymbols[].cardId`. The mock answers ALL
+/// clusters in one reply (mirroring the single batched `label_step` call), mapping each member
+/// card id to a per-card summary so `cardSummaries` matches what the real model returns.
+fn all_label_clusters(user: &str) -> Vec<(String, Vec<String>)> {
     serde_json::from_str::<Value>(user)
         .ok()
-        .and_then(|v| v.get("clusters").and_then(|c| c.get(0)).cloned())
-        .and_then(|c| c.get("clusterId").and_then(|s| s.as_str()).map(String::from))
-        .unwrap_or_default()
-}
-
-/// The member card ids of the first cluster in a (single-cluster) label request body —
-/// `clusters[0].changedSymbols[].cardId`. The mock maps each to a per-card summary so the
-/// `cardSummaries` reply mirrors what the real model returns (one per member).
-fn first_cluster_member_ids(user: &str) -> Vec<String> {
-    serde_json::from_str::<Value>(user)
-        .ok()
-        .and_then(|v| v.get("clusters").and_then(|c| c.get(0)).cloned())
-        .and_then(|c| c.get("changedSymbols").and_then(|s| s.as_array()).cloned())
-        .map(|syms| {
-            syms.iter()
-                .filter_map(|s| s.get("cardId").and_then(|id| id.as_str()).map(String::from))
+        .and_then(|v| v.get("clusters").and_then(|c| c.as_array()).cloned())
+        .map(|clusters| {
+            clusters
+                .iter()
+                .filter_map(|c| {
+                    let id = c.get("clusterId").and_then(|s| s.as_str())?.to_string();
+                    let members = c
+                        .get("changedSymbols")
+                        .and_then(|s| s.as_array())
+                        .map(|syms| {
+                            syms.iter()
+                                .filter_map(|s| {
+                                    s.get("cardId").and_then(|id| id.as_str()).map(String::from)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((id, members))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -86,24 +96,30 @@ impl LlmProvider for SeqProvider {
         // discriminator the cache mock uses).
         let is_label = req.system.contains("title") && req.system.contains("summary");
         let json = if is_label {
-            let id = first_cluster_id(&req.user);
-            let (title, summary) = self
-                .labels
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| ("변경".to_string(), "요약".to_string()));
-            // One per-card summary per member card id the request carried (mirrors the model).
-            let card_summaries: Vec<Value> = first_cluster_member_ids(&req.user)
+            // Batched label call: answer EVERY cluster the request carried (one reply object).
+            let clusters: Vec<Value> = all_label_clusters(&req.user)
                 .into_iter()
-                .map(|cid| json!({ "cardId": cid, "summary": format!("{cid} 카드 변경 요약") }))
+                .map(|(id, members)| {
+                    let (title, summary) = self
+                        .labels
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| ("변경".to_string(), "요약".to_string()));
+                    // One per-card summary per member card id (mirrors the real model).
+                    let card_summaries: Vec<Value> = members
+                        .into_iter()
+                        .map(|cid| json!({ "cardId": cid, "summary": format!("{cid} 카드 변경 요약") }))
+                        .collect();
+                    json!({
+                        "clusterId": id,
+                        "title": title,
+                        "summary": summary,
+                        "cardSummaries": card_summaries
+                    })
+                })
                 .collect();
             json!({
-                "clusters": [ {
-                    "clusterId": id,
-                    "title": title,
-                    "summary": summary,
-                    "cardSummaries": card_summaries
-                } ],
+                "clusters": clusters,
                 "mergeSuggestions": [],
                 "splitSuggestions": []
             })
@@ -176,7 +192,7 @@ async fn small_pr_takes_combined_branch_then_labels() {
         .await
         .expect("pipeline succeeds");
 
-    assert_eq!(provider.call_count(), 2, "small PR ⇒ combined(1) + 1 cluster label(1) = 2 calls");
+    assert_eq!(provider.call_count(), 2, "small PR ⇒ combined(1) + batched label(1) = 2 calls");
     assert_eq!(layout.clusters.len(), 1);
     let c = &layout.clusters[0];
     assert_eq!(c.id, "k1");
@@ -190,8 +206,11 @@ async fn small_pr_takes_combined_branch_then_labels() {
 }
 
 #[tokio::test]
-async fn big_pr_runs_three_calls_and_orders_across_clusters() {
-    // 13 symbols > SMALL_PR_SYMBOLS ⇒ separate cluster + order + label (3 calls).
+async fn medium_pr_still_combined_and_orders_across_clusters() {
+    // 13 symbols: > SMALL_PR_SYMBOLS(12) but ≤ COMBINED_MAX_SYMBOLS(48) ⇒ the COMBINED path is
+    // still the default (the combine/split switch is COMBINED_MAX_SYMBOLS now). So this is
+    // combined(1) + batched label(1) = 2 calls, NOT a 3-call split. The combined reply carries
+    // two clusters with already-ordered members + clusterOrder, exercising cross-cluster order.
     let names: Vec<(&str, &str)> = vec![
         ("a", "handleLogin"), ("b", "validateToken"), ("c", "saveSession"),
         ("d", "kakaoFetch"), ("e", "mapProfile"), ("f", "upsertUser"),
@@ -201,25 +220,18 @@ async fn big_pr_runs_three_calls_and_orders_across_clusters() {
     let cards = vec![card("seed-1", &names)];
     let provider = SeqProvider::with_labels(
         vec![
-            // clustering: two clusters.
+            // combined: two clusters with ordered memberCardIds (k2 returns h,g reordered) +
+            // clusterOrder; the rest fall to unclustered. One object, one call.
             json!({
                 "clusters": [
                     { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" },
-                    { "clusterId": "k2", "memberCardIds": ["g", "h"], "kind": "domain-concept" }
+                    { "clusterId": "k2", "memberCardIds": ["h", "g"], "kind": "domain-concept" }
                 ],
-                "unclustered": ["k", "l", "m", "d", "e", "f", "i", "j"]
-            }),
-            // ordering: reorder members + put k2 (domain) before k1 (flow) is allowed; here
-            // we keep flow first. orderedByCluster must be a permutation of each cluster.
-            json!({
-                "clusterOrder": ["k1", "k2"],
-                "orderedByCluster": [
-                    { "clusterId": "k1", "cardIds": ["a", "b", "c"] },
-                    { "clusterId": "k2", "cardIds": ["h", "g"] }
-                ]
+                "unclustered": ["k", "l", "m", "d", "e", "f", "i", "j"],
+                "clusterOrder": ["k1", "k2"]
             }),
         ],
-        // per-cluster labels (one call each).
+        // batched labels (one call covers both clusters).
         &[
             ("k1", "로그인 흐름", "Handles login."),
             ("k2", "JWT 발급", "Issues JWT."),
@@ -232,11 +244,11 @@ async fn big_pr_runs_three_calls_and_orders_across_clusters() {
 
     assert_eq!(
         provider.call_count(),
-        4,
-        "big PR ⇒ cluster(1) + order(1) + per-cluster label(2) = 4 calls"
+        2,
+        "medium PR (13 ≤ COMBINED_MAX_SYMBOLS) ⇒ combined(1) + batched label(1) = 2 calls"
     );
     assert_eq!(layout.cluster_order, vec!["k1".to_string(), "k2".to_string()]);
-    // k2's members came back reordered as h,g.
+    // k2's members came back reordered as h,g (combined memberCardIds are already ordered).
     let k2 = layout.clusters.iter().find(|c| c.id == "k2").unwrap();
     assert_eq!(k2.ordered_card_ids, vec!["h".to_string(), "g".to_string()]);
     assert_eq!(k2.kind, ClusterKind::DomainConcept);
@@ -250,6 +262,101 @@ async fn big_pr_runs_three_calls_and_orders_across_clusters() {
     for c in &layout.clusters {
         assert!(!c.title.trim().is_empty() && !c.summary.trim().is_empty());
     }
+}
+
+#[tokio::test]
+async fn large_pr_over_combined_cap_splits_into_three_calls() {
+    // > COMBINED_MAX_SYMBOLS(48) symbols ⇒ a genuinely large PR forces the ④⑤ SPLIT path:
+    // cluster_step(1) + order_step(1) + batched label(1) = 3 calls. (Two combined-shaped
+    // replies are NOT consumed; the split path reads a clustering reply then an ordering reply.)
+    let names: Vec<(String, String)> = (0..49)
+        .map(|i| (format!("c{i}"), format!("sym{i}")))
+        .collect();
+    let pairs: Vec<(&str, &str)> = names.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let cards = vec![card("seed-1", &pairs)];
+
+    // Cluster all 49 into one cluster k1 (members in id order) so verify_order's permutation
+    // check passes; ordering returns the same membership.
+    let all_ids: Vec<String> = names.iter().map(|(a, _)| a.clone()).collect();
+    let provider = SeqProvider::with_labels(
+        vec![
+            // clustering reply (split path, step 1).
+            json!({
+                "clusters": [ { "clusterId": "k1", "memberCardIds": all_ids, "kind": "flow" } ],
+                "unclustered": []
+            }),
+            // ordering reply (split path, step 2) — permutation of k1's members.
+            json!({
+                "clusterOrder": ["k1"],
+                "orderedByCluster": [
+                    { "clusterId": "k1", "cardIds": names.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>() }
+                ]
+            }),
+        ],
+        &[("k1", "대규모 변경", "Large change.")],
+    );
+
+    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
+        .await
+        .expect("pipeline succeeds");
+
+    assert_eq!(
+        provider.call_count(),
+        3,
+        "large PR (> COMBINED_MAX_SYMBOLS) ⇒ cluster(1) + order(1) + batched label(1) = 3 calls"
+    );
+    assert_eq!(layout.clusters.len(), 1);
+    assert_eq!(layout.ordered_card_ids.len(), 49, "every changed symbol appears once");
+    assert!(layout.unclustered.is_empty());
+}
+
+#[tokio::test]
+async fn combined_parse_error_falls_back_to_split() {
+    // The PR fits the combined cap (3 symbols), so the combined call is *attempted* — but it
+    // returns an unparseable body (modeling a truncated/length-error mega-output). The
+    // orchestrator must degrade to the ④⑤ SPLIT path rather than fail: a malformed combined
+    // reply, then a clustering reply, then an ordering reply, then a batched label =
+    // 1 (failed combined, retried once = 2 provider calls) + cluster(1) + order(1) + label(1).
+    // We assert the layout is correct and that the split path actually ran (the clustering +
+    // ordering replies were consumed).
+    let cards = vec![card("seed-1", &[("a", "create"), ("b", "validate"), ("c", "save")])];
+    let provider = SeqProvider::with_labels(
+        vec![
+            // combined attempt #1: malformed (missing required `clusters`) ⇒ Parse error.
+            json!({ "garbage": true }),
+            // combined attempt #2 (one retry): still malformed ⇒ Parse error ⇒ split fallback.
+            json!({ "garbage": true }),
+            // split path step 1 — clustering.
+            json!({
+                "clusters": [ { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" } ],
+                "unclustered": []
+            }),
+            // split path step 2 — ordering (permutation of k1).
+            json!({
+                "clusterOrder": ["k1"],
+                "orderedByCluster": [ { "clusterId": "k1", "cardIds": ["a", "b", "c"] } ]
+            }),
+        ],
+        &[("k1", "생성 흐름", "Creates, validates, saves.")],
+    );
+
+    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
+        .await
+        .expect("pipeline succeeds via split fallback");
+
+    // 2 failed combined attempts + cluster(1) + order(1) + batched label(1) = 5 provider calls.
+    assert_eq!(
+        provider.call_count(),
+        5,
+        "combined retried once (2), then split cluster(1)+order(1)+label(1) = 5 provider calls"
+    );
+    assert_eq!(layout.clusters.len(), 1);
+    let c = &layout.clusters[0];
+    assert_eq!(c.id, "k1");
+    assert_eq!(c.ordered_card_ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert_eq!(c.title, "생성 흐름");
+    assert_eq!(layout.ordered_card_ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert!(layout.unclustered.is_empty());
 }
 
 /// A file seed-card: a singleton whose member card_id is a `<path>::__file` id and whose
@@ -341,8 +448,8 @@ async fn empty_cards_produce_empty_layout_without_calls() {
 
 #[tokio::test]
 async fn cache_guard_rejects_layouts_with_fallen_back_labels() {
-    // `label_one` never errors the pipeline — a failed label call yields the B1 fallback
-    // title (`FALLBACK_TITLE`). Such a *transiently failed* layout must be flagged
+    // The batched `label_step` is B1-safe — a skipped/failed label yields the B1 fallback
+    // title (`FALLBACK_TITLE`) via backfill. Such a *transiently failed* layout must be flagged
     // un-cacheable so a one-off label failure is never frozen into the SHA cache and served
     // forever. Here a successful run is cacheable; flipping a title to the fallback makes it not.
     let cards = vec![card("seed-1", &[("a", "create")])];

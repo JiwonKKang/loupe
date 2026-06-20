@@ -312,12 +312,17 @@ pub struct ClusterLayout {
 ///  2. [`analyze_relations`] → strong-seed first-pass clusters + relation hints.
 ///  3. [`clustercard::build_cluster_cards`] → one refined `ClusterCardInput` per seed
 ///     (no raw diff; short summaries only — input-size defence).
-///  4+5. **Small PR (≤ SMALL_PR_SYMBOLS): one combined call** clusters AND orders
-///     ([`ai::steps::cluster_and_order_combined`], planning §4.1). **Big PR: two calls** —
-///     [`ai::steps::cluster_step`] then [`ai::steps::order_step`]. Both are whitelist-
+///  4+5. **Default: one combined call** clusters AND orders
+///     ([`ai::steps::cluster_and_order_combined`], planning §4.1) for small *and* medium PRs.
+///     A genuinely large PR (symbols > [`ai::steps::COMBINED_MAX_SYMBOLS`]) — or a combined
+///     call that returns a length/parse error — splits into two calls
+///     ([`ai::steps::cluster_step`] then [`ai::steps::order_step`]). Both are whitelist-
 ///     verified (hallucination reject; omitted ids absorbed; ordering = permutation).
 ///  6. [`ai::steps::label_step`] → ONE batched title/summary call for all clusters,
 ///     B1-safe + M4 token-checked (§6.2 / §8.4).
+///
+/// **AI calls are 2 fixed on a cache miss**: ④⑤ combined (1) + ⑥ batched (1). Only a large /
+/// over-budget PR pays a 3rd call for the ④⑤ split.
 ///
 /// On AI failure (after each step's one retry) the `Err` propagates so a caller can fall
 /// back; this function does not itself implement the layer-heuristic fallback (Stage-⑩).
@@ -594,8 +599,8 @@ pub async fn analyze_clusters_cached(
     Ok(layout)
 }
 
-/// Whether a freshly-produced layout is complete enough to **cache**. `label_one` never errors
-/// the pipeline — on an AI/parse failure it returns the B1 fallback label
+/// Whether a freshly-produced layout is complete enough to **cache**. The batched `label_step`
+/// is B1-safe — a skipped/failed label is backfilled with the B1 fallback label
 /// ([`ai::steps::FALLBACK_TITLE`] / [`ai::steps::FALLBACK_SUMMARY`]). That makes a *transiently
 /// failed* labelling indistinguishable from a real one at the layout level, so without this
 /// guard a one-off label failure (rate-limit, auth blip) would be cached and served forever
@@ -687,35 +692,45 @@ pub async fn run_cluster_pipeline(
     progress: &dyn ProgressSink,
 ) -> Result<ClusterLayout, ai::LlmError> {
     use ai::steps;
-    use futures_util::stream::{self, StreamExt};
 
     let whitelist = steps::whitelist_of(cards);
 
-    // ④+⑤: small PR ⇒ one combined call; big PR ⇒ cluster then order (planning §4.1). As soon
-    // as membership is known we tell the loader which clusters it will review (spinning) so the
-    // queue rail can appear before the per-cluster reviews come back.
-    let (clustering, ordering) = if steps::is_small_pr(cards) {
-        let pair = steps::cluster_and_order_combined(provider, cards).await?;
-        progress.emit(Progress::Clusters {
-            clusters: progress_clusters(&pair.0, cards),
-        });
-        pair
+    // ④+⑤: the **combined** call is the default (small *and* medium PRs) so a cache-miss
+    // analysis is ④⑤(1) + ⑥(1) = 2 AI calls. We split into `cluster_step` + `order_step` (3
+    // calls total) ONLY when:
+    //   (a) the PR is genuinely large — symbol count > COMBINED_MAX_SYMBOLS (`combined_fits`
+    //       false), so a single combined output would risk truncation/verify churn; or
+    //   (b) the combined call *would* fit but came back with a length/parse error
+    //       (`LlmError::Parse` — truncated mega-output or malformed JSON): we degrade to the
+    //       split path rather than fail. Transport errors (Auth/Overloaded/Timeout/Http/
+    //       Refusal) are infrastructural — splitting won't help — so those propagate.
+    // As soon as membership is known we tell the loader which clusters it will review (spinning)
+    // so the queue rail can appear before the reviews come back. `Progress::Clusters` is emitted
+    // exactly once, after the structure is final, with the same fields as before.
+    let (clustering, ordering) = if steps::combined_fits(cards) {
+        match steps::cluster_and_order_combined(provider, cards).await {
+            Ok(pair) => pair,
+            // Length/parse failure on the combined call ⇒ split fallback (still no error to the
+            // caller). A transport error is surfaced so the caller can retry/back off.
+            Err(ai::LlmError::Parse(_)) => cluster_then_order(provider, cards, hints, &whitelist).await?,
+            Err(e) => return Err(e),
+        }
     } else {
-        let clustering = steps::cluster_step(provider, cards).await?;
-        progress.emit(Progress::Clusters {
-            clusters: progress_clusters(&clustering, cards),
-        });
-        let ordering = steps::order_step(provider, &clustering, hints, &whitelist).await?;
-        (clustering, ordering)
+        // Genuinely large PR: split ④⑤ so each output stays small/verifiable (3-call path).
+        cluster_then_order(provider, cards, hints, &whitelist).await?
     };
+    progress.emit(Progress::Clusters {
+        clusters: progress_clusters(&clustering, cards),
+    });
 
-    // ⑥: review each cluster on its own AI call, bounded-concurrent, revealing each in the
-    // loader the moment it finishes (`Reviewed`). Completion order is cosmetic — the final
-    // layout is assembled from `clustering`/`ordering`, not from this order — so streaming the
-    // labels per-cluster changes nothing about the result, only how the wait is shown.
+    // ⑥: ONE batched label call for ALL clusters (the 2-call target — never per-cluster N
+    // calls). The single `label_step` returns every cluster's title/summary + per-card
+    // summaries; we then fold them and stream `Progress::Reviewed` per cluster in flow order so
+    // the loader's event contract is unchanged (the rail fills at once rather than in waves).
     let label_inputs = build_label_inputs(&clustering, cards);
     let allowed_names = allowed_symbol_names(cards);
-    let allowed_ref = &allowed_names;
+
+    let label_outcome = steps::label_step(provider, &label_inputs, &allowed_names).await?;
 
     // cluster_id -> the set of member card ids the cluster actually owns. The per-card summary
     // fold whitelists each returned `cardId` against this so a hallucinated id is dropped (M4).
@@ -729,31 +744,32 @@ pub async fn run_cluster_pipeline(
                 )
             })
             .collect();
+    // label result keyed by cluster id (for the Reviewed loop's chapter title + summary fold).
+    let label_by_id: std::collections::BTreeMap<&str, &ai::steps::ClusterLabel> = label_outcome
+        .labels
+        .clusters
+        .iter()
+        .map(|l| (l.cluster_id.as_str(), l))
+        .collect();
 
-    let mut labels: Vec<ai::steps::ClusterLabel> = Vec::with_capacity(label_inputs.len());
-    let mut suspicious: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
     // Accumulated per-card AI summaries across all clusters (folded into the layout). A later
     // cluster never overwrites an earlier id (clusters partition the cards, so collisions
     // shouldn't happen; `entry`-keep makes it deterministic if they ever do).
     let mut card_summaries: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    // Build the per-cluster review futures eagerly (each borrows `provider`/`allowed_ref`), then
-    // drive up to LABEL_CONCURRENCY at once. (Collecting the futures avoids a higher-ranked
-    // lifetime error that a `.map(|inp| async move {…})` closure trips over.)
-    let review_futs: Vec<_> = label_inputs
-        .iter()
-        .map(|inp| steps::label_one(provider, inp, allowed_ref))
-        .collect();
-    let mut reviews = stream::iter(review_futs).buffer_unordered(LABEL_CONCURRENCY);
-    while let Some((label, bad)) = reviews.next().await {
+
+    // Stream a `Reviewed` per cluster in flow order (the labelling is already done; this is the
+    // same event the per-cluster fan-out used to emit, so the loader contract is preserved). We
+    // walk `clustering.clusters` for a deterministic, structure-defined order. Each cluster's
+    // per-card summaries are folded here under the M4 member whitelist.
+    for c in &clustering.clusters {
+        let Some(label) = label_by_id.get(c.cluster_id.as_str()) else {
+            continue; // backfill guarantees a label for every input cluster; defensive.
+        };
         progress.emit(Progress::Reviewed {
             id: label.cluster_id.clone(),
             chapter: label.title.clone(),
         });
-        if !bad.is_empty() {
-            suspicious.insert(label.cluster_id.clone(), bad);
-        }
         // Fold this cluster's per-card summaries: keep only ids that are real members of the
         // cluster (M4 whitelist) and non-empty summaries; first writer wins (determinism).
         if let Some(members) = members_by_cluster.get(label.cluster_id.as_str()) {
@@ -764,27 +780,26 @@ pub async fn run_cluster_pipeline(
                 }
             }
         }
-        labels.push(label);
     }
-
-    let label_outcome = ai::steps::LabelOutcome {
-        labels: ai::steps::LabelResult {
-            clusters: labels,
-            merge_suggestions: Vec::new(),
-            split_suggestions: Vec::new(),
-        },
-        suspicious,
-    };
 
     // All clusters reviewed → the final ordering/assembly pass.
     progress.emit(Progress::Final);
     Ok(assemble_layout(clustering, ordering, label_outcome, card_summaries, cards))
 }
 
-/// Max clusters reviewed concurrently in Stage-⑥. Each review is its own `claude` CLI call,
-/// so this bounds how many subprocesses run at once (the rail fills in waves rather than all
-/// at once on a large PR). Small enough to be gentle on the machine / rate limits.
-const LABEL_CONCURRENCY: usize = 4;
+/// ④⑤ **split** path: cluster (one call) then order (one call). Factored out of
+/// [`run_cluster_pipeline`] so it serves both the genuinely-large-PR branch and the
+/// length/parse-error fallback from a combined call.
+async fn cluster_then_order(
+    provider: &dyn ai::LlmProvider,
+    cards: &[clustercard::ClusterCardInput],
+    hints: &relations::RelationHints,
+    whitelist: &std::collections::BTreeSet<String>,
+) -> Result<(ai::steps::ClusterResult, ai::steps::OrderResult), ai::LlmError> {
+    let clustering = ai::steps::cluster_step(provider, cards).await?;
+    let ordering = ai::steps::order_step(provider, &clustering, hints, whitelist).await?;
+    Ok((clustering, ordering))
+}
 
 /// Build the loader's provisional cluster list from the clustering result: each cluster's id,
 /// a readable provisional chapter label (the real AI title arrives later per `Reviewed`), and
