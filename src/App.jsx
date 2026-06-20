@@ -85,6 +85,15 @@ export default function App() {
   const [threads, setThreads] = React.useState([]);
   const [treeOpen, setTreeOpen] = React.useState(false);
   const tid = React.useRef(1);
+  // #8/#9 — unread AI answers. `unreadThreads` holds the ids of threads whose AI
+  // reply has landed but the user has NOT yet expanded that thread to read it.
+  //   • marked unread  = sendThread resolves while the thread is not visibly open
+  //   • cleared (read) = openLine makes that thread `open` (NOT mere card nav).
+  // `flashCluster` is the cluster id that should briefly flash on the collapsed
+  // spine when a fresh answer arrives off-screen (transient, auto-cleared ~2.4s).
+  const [unreadThreads, setUnreadThreads] = React.useState(() => new Set());
+  const [flashCluster, setFlashCluster] = React.useState(null);
+  const flashTimer = React.useRef(null);
   // Guards a stale analyze_review response from clobbering a newer project's state.
   const analyzeSeq = React.useRef(0);
 
@@ -117,6 +126,10 @@ export default function App() {
     setIndex(0);
     setVerdicts({});
     setThreads([]);
+    // Fresh project → drop any pending unread/flash from the previous one.
+    setUnreadThreads(new Set());
+    setFlashCluster(null);
+    if (flashTimer.current) { clearTimeout(flashTimer.current); flashTimer.current = null; }
     // Reset the cluster overlay for the new project.
     setClusters([]); setClusterOrder([]); setOrderedCardIds([]); setUnclustered([]);
     setAnalysisState('clustering');
@@ -171,6 +184,9 @@ export default function App() {
     }).then((un) => { if (alive) unlisten = un; else un(); });
     return () => { alive = false; if (unlisten) unlisten(); };
   }, []);
+
+  // Clear the pending flash timeout if the component ever unmounts mid-flash.
+  React.useEffect(() => () => { if (flashTimer.current) clearTimeout(flashTimer.current); }, []);
 
   // Choose a project from the ProjectMenu → store the range + run analysis + show
   // the review. Same trigger the menu's "Open / Re-run review" hands up.
@@ -254,6 +270,8 @@ export default function App() {
   const threadCount = (cid) => threads.filter((t) => t.cardId === cid).length;
   // A card with unresolved threads IS the "flag" (Needs attention).
   const hasUnresolved = (cid) => threads.some((t) => t.cardId === cid && !t.resolved);
+  // #8 — a card has an unread answer if any of its threads is in unreadThreads.
+  const hasUnread = (cid) => threads.some((t) => t.cardId === cid && unreadThreads.has(t.id));
   const spineItems = list.map((c) => {
     const cl = clusterOf(c);
     // Group key: cluster id when analysed, else the Stage-1 chapter (file) so the spine is
@@ -265,6 +283,10 @@ export default function App() {
       clusterKind: cl ? cl.kind : null, clusterSummary: cl ? cl.summary : '',
       file: c.path.split('/').pop(), threads: threadCount(c.id),
       status: hasUnresolved(c.id) ? 'flag' : (verdicts[c.id] === 'pass' ? 'pass' : 'pending'),
+      // #8 spine signals: a card carrying an unread answer (`unread`) and whether
+      // its cluster is mid-flash because an answer just landed off-screen (`flash`).
+      unread: hasUnread(c.id),
+      flash: flashCluster != null && clusterId === flashCluster,
     };
   });
   const unresolved = threads.filter((t) => !t.resolved).length;
@@ -282,13 +304,66 @@ export default function App() {
   const next = () => { if (index < list.length - 1) goTo(index + 1, 1); else setScreen('summary'); };
   const prev = () => { if (index > 0) goTo(index - 1, -1); };
 
+  // The active card id, mirrored into a ref so an in-flight ask_thread that
+  // resolves later can tell whether ITS thread is still the one on screen — the
+  // render-scoped `card` would be stale by the time the promise settles.
+  const activeCardIdRef = React.useRef(null);
+  React.useEffect(() => { activeCardIdRef.current = card ? card.id : null; }, [card]);
+
+  // Mark a thread as read (#8): remove it from unreadThreads. Identity-stable
+  // (no-op when the id wasn't unread) so it never forces a needless re-render.
+  const clearUnread = (id) => setUnreadThreads((prev) => {
+    if (!prev.has(id)) return prev;
+    const next = new Set(prev);
+    next.delete(id);
+    return next;
+  });
+
+  // Mark a thread unread (#8) and flash its cluster on the collapsed spine.
+  // The flash is transient: the cluster id is held in `flashCluster` for ~2.4s,
+  // then cleared. Re-arming the timer on each new answer keeps the latest flash
+  // alive for its full window rather than being cut short by an earlier one.
+  const markUnread = (id, cardId) => {
+    setUnreadThreads((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    const c = (cards || []).find((x) => x.id === cardId);
+    const cl = clusterOf(c);
+    // Group key matches spineItems' (cluster id when analysed, else the chapter/file).
+    const flashKey = cl ? cl.id : (c ? c.chapter : null);
+    if (flashKey == null) return;
+    setFlashCluster(flashKey);
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => { flashTimer.current = null; setFlashCluster(null); }, 2400);
+  };
+
   const openLine = (side, lineN) => {
     if (!card) return;
     // Threads are keyed by ROW now (before+after highlight together, GitHub-style);
     // `side` is only remembered so a collapsed badge sits in that column's gutter.
     const existing = threads.find((t) => t.cardId === card.id && t.lineN === lineN);
     if (existing) {
-      setThreads((p) => p.map((t) => t.id === existing.id ? { ...t, open: !t.open } : t));
+      // #2 — a thread the user opened but never spoke into is transient: toggling
+      // it shut (it's currently open with NO user message) discards it entirely
+      // rather than leaving an empty collapsed badge. A thread that carries any
+      // user message (question OR command) toggles open/closed as before, so
+      // resolve/command history is always preserved.
+      const hasUserMsg = existing.messages.some((m) => m.author === 'you');
+      if (existing.open && !hasUserMsg) {
+        setThreads((p) => p.filter((t) => t.id !== existing.id));
+        // A transient thread can't be unread (it never received an answer), but
+        // drop it from the set defensively so the id can't linger.
+        clearUnread(existing.id);
+        return;
+      }
+      const willOpen = !existing.open;
+      setThreads((p) => p.map((t) => t.id === existing.id ? { ...t, open: willOpen } : t));
+      // #8 read model: reading == expanding the thread. Opening it clears unread;
+      // collapsing it does NOT (and merely navigating cards never touches unread).
+      if (willOpen) clearUnread(existing.id);
       return;
     }
     const id = 't' + (tid.current++);
@@ -350,9 +425,20 @@ export default function App() {
 
     invoke('ask_thread', { token, repoPath, context, question: text, history })
       .then((answer) => {
-        setThreads((p) => p.map((x) => x.id === id
-          ? { ...x, pending: false, messages: [...x.messages, { author: 'ai', text: String(answer), time: 'now' }] }
-          : x));
+        let landedThread = null;
+        setThreads((p) => p.map((x) => {
+          if (x.id !== id) return x;
+          landedThread = x; // freshest snapshot of the thread the answer is for
+          return { ...x, pending: false, messages: [...x.messages, { author: 'ai', text: String(answer), time: 'now' }] };
+        }));
+        // #8 — if the user isn't actually looking at this answer right now, mark it
+        // unread and flash its cluster on the collapsed spine. "Visibly open" means
+        // the thread is expanded AND sitting on the active card; navigating cards or
+        // collapsing the thread (without reading the new reply) leaves it unread.
+        if (!landedThread) return; // thread was removed mid-flight — nothing to mark
+        const visible = landedThread.open && activeCardIdRef.current === landedThread.cardId;
+        if (visible) return;
+        markUnread(landedThread.id, landedThread.cardId);
       })
       .catch((err) => {
         setThreads((p) => p.map((x) => x.id === id
@@ -486,6 +572,7 @@ export default function App() {
           analysisState={analysisState}
           onOpenSummary={() => setScreen('summary')}
           spineItems={spineItems} onSelect={(id) => { const i = list.findIndex((c) => c.id === id); goTo(i, i > index ? 1 : -1); }}
+          unreadThreads={unreadThreads}
           verdict={verdicts[card.id]} flagged={hasUnresolved(card.id)}
           hasPrev={index > 0} hasNext={index < list.length - 1}
           onPass={pass} onPrev={prev} onNext={next}

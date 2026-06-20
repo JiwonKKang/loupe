@@ -76,7 +76,7 @@ const AGENTIC_DISALLOWED_TOOLS: &[&str] =
 /// they are far slower than a single completion; without a cap a stuck turn (e.g. waiting on
 /// something) would hang the Tauri command forever. On expiry we return a human-readable Err
 /// instead of blocking the UI.
-const AGENTIC_TIMEOUT: Duration = Duration::from_secs(180);
+const AGENTIC_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The env var the `claude` CLI reads for the setup-token (OAuth). Set on the child
 /// process only — never logged, never placed on the command line.
@@ -323,7 +323,7 @@ fn extract_agentic_result(wrapper: &Value) -> Result<String, String> {
 ///  - `current_dir(repo_path)` confines tool access to that repo (no access outside it).
 ///  - the setup-token goes to the child via the `CLAUDE_CODE_OAUTH_TOKEN` env only — **never on
 ///    argv, never logged**.
-///  - a 180 s `tokio::time::timeout` caps a stuck run so the Tauri command can never hang.
+///  - a 600 s `tokio::time::timeout` caps a stuck run so the Tauri command can never hang.
 ///
 /// `bin` overrides the binary (a stub script in tests); `None` uses the default on `PATH`.
 pub async fn ask_agentic(

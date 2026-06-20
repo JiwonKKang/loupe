@@ -10,6 +10,7 @@ export function Thread({
   resolved = false,
   pending = false,
   collapsed = false,
+  unread = false,
   onToggle,
   onResolve,
   onSend,
@@ -19,18 +20,30 @@ export function Thread({
 
   if (collapsed) {
     const hasCommand = messages.some((m) => m.kind === 'command');
+    // #9 — a collapsed thread that has an unread AI answer (the user hasn't
+    // expanded it since the reply landed) reads as "답변 왔음": the pill keeps the
+    // accent tone even if resolved-styling would otherwise dim it, gains an accent
+    // ring glow, and carries a pulsing accent dot. Read = expanding the thread,
+    // which clears unread upstream (App.openLine), so this only shows pre-open.
+    const showUnread = unread && !resolved;
     return (
-      <button onClick={onToggle} style={{
+      <button onClick={onToggle} title={showUnread ? '답변 왔음 — 펼쳐서 확인하세요' : undefined} style={{
         display: 'inline-flex', alignItems: 'center', gap: 6,
         height: 22, padding: '0 9px', borderRadius: 'var(--radius-pill)',
-        background: resolved ? 'var(--surface-overlay)' : 'var(--accent-dim)',
-        border: `1px solid ${resolved ? 'var(--border-default)' : 'var(--accent-line)'}`,
-        color: resolved ? 'var(--text-tertiary)' : 'var(--accent)',
+        background: resolved && !showUnread ? 'var(--surface-overlay)' : 'var(--accent-dim)',
+        border: `1px solid ${resolved && !showUnread ? 'var(--border-default)' : 'var(--accent-line)'}`,
+        color: resolved && !showUnread ? 'var(--text-tertiary)' : 'var(--accent)',
         font: `var(--weight-medium) 11px/1 var(--font-ui)`,
         cursor: 'pointer',
+        boxShadow: showUnread ? '0 0 0 3px var(--accent-dim), 0 0 12px 1px rgba(110,139,255,0.35)' : 'none',
         animation: 'loupe-thread-badge-in var(--dur-base) var(--ease-out)',
         ...style,
       }}>
+        {showUnread && (
+          <span aria-label="답변 왔음" style={{ width: 6, height: 6, borderRadius: 999, flex: 'none',
+            background: 'var(--accent)', marginRight: 1,
+            animation: 'loupe-unread-blink 1.4s var(--ease-soft) infinite' }} />
+        )}
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -96,10 +109,13 @@ export function Thread({
         {/* AI is composing a real answer — a quiet "thinking" row with a spinner.
             Shows beneath the messages (works even when messages is empty). */}
         {pending && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 12, height: 12, borderRadius: 999, flex: 'none',
-              border: '2px solid var(--accent-line)', borderTopColor: 'var(--accent)',
-              animation: 'loupe-spin 0.7s linear infinite' }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {/* #1 — AI 대기 로딩 = 로고 로딩. A small accent core that breathes with
+                the same loupe-core-glow halo the brand mark uses (not a generic
+                spinner ring). The 4px margin leaves room for the glow box-shadow. */}
+            <span style={{ width: 10, height: 10, borderRadius: 999, flex: 'none',
+              margin: 4, background: 'var(--accent)',
+              animation: 'loupe-core-glow 2s var(--ease-soft) infinite' }} />
             <span style={{ font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)',
               color: 'var(--text-tertiary)' }}>AI가 생각 중…</span>
           </div>

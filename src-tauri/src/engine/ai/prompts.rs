@@ -181,8 +181,9 @@ each individual changed card. You are given `clusters`, each with its `clusterId
 algorithmic `kind`, and its `changedSymbols` (each: `cardId` + name + kind + change + an \
 optional `snippet` of the actual added/removed diff lines). For EVERY cluster return:
 
-  - `title`: the change in the form [target] + [change action], short (e.g. \"주문 생성 시 \
-쿠폰 할인 적용\", \"결제 실패 이벤트 재시도 정책 변경\"). Never empty.
+  - `title`: the change in the form [target] + [change action], very short (e.g. \"쿠폰 할인 \
+적용\", \"재시도 정책 변경\"). Never empty. title은 매우 짧게 — 한국어 ≤14자, 2~4단어 \
+명사구, 문장 금지, 핵심만. (예시처럼 조사·부연을 덜어내고 핵심 명사구만 남길 것.)
   - `summary`: 1 to 2 sentences stating the cluster's ONE overall INTENT — what behaviour \
 or capability this group of changes achieves, as a reviewer would describe its purpose. \
 Never empty.

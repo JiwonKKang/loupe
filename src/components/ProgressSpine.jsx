@@ -45,6 +45,19 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
     });
   });
 
+  // Collapsed cluster-dot pass color (#8a): a group's single dot reflects how far
+  // its cards are reviewed — every card passed → green, some passed (mixed) →
+  // amber, none → faint. (A card needing attention counts as not-yet-pass here;
+  // the goal is "how much of this cluster is done", and the active glow still
+  // marks where you are.) Returns the CSS color for the group's resting dot.
+  const groupPassColor = (g) => {
+    const total = g.items.length;
+    const passed = g.items.filter((i) => i.status === 'pass').length;
+    if (total > 0 && passed === total) return 'var(--pass)';
+    if (passed > 0) return 'var(--flag)';
+    return 'var(--text-faint)';
+  };
+
   const passed = items.filter((i) => i.status === 'pass' || i.status === 'flag').length;
 
   return (
@@ -91,12 +104,16 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
                 </div>
               </div>
             )}
-            {/* Collapsed rail: ONE dot per cluster (not per card). The spine is quiet — every
-                dot is the same faint tone (no per-kind colors competing); only the cluster
-                holding the focused card lights up (accent + glow). Click jumps to it. */}
+            {/* Collapsed rail: ONE dot per cluster (not per card). The spine is quiet, but the
+                dot now carries the cluster's review progress (#8a): green when every card in
+                it has passed, amber when some have, faint when none. The cluster holding the
+                focused card still lights up (accent + glow). When a fresh AI answer lands for
+                a card in a cluster you're not looking at, that dot briefly flashes the logo-
+                loading glow (#8d, transient) so the new reply is noticed. Click jumps to it. */}
             {!expanded && (() => {
               const groupActive = g.items.some((it) => it.id === activeId);
-              const col = groupActive ? statusColor.active : 'var(--text-faint)';
+              const groupFlash = g.items.some((it) => it.flash);
+              const col = groupActive ? statusColor.active : groupPassColor(g);
               const firstId = g.items[0] && g.items[0].id;
               return (
                 <div title={g.title} onClick={() => firstId && onSelect && onSelect(firstId)} style={{
@@ -104,12 +121,23 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
                   background: col, cursor: onSelect ? 'pointer' : 'default',
                   boxShadow: groupActive ? '0 0 0 4px var(--accent-dim)' : 'none',
                   transition: 'var(--t-hover)',
+                  // Transient flash (no active glow to fight): pulse the accent halo a
+                  // few beats. groupFlash itself is cleared upstream (~2.4s), unmounting
+                  // the animation, so it never runs forever.
+                  ...(groupFlash && !groupActive
+                    ? { animation: 'loupe-core-glow 0.8s var(--ease-soft) 3' }
+                    : null),
                 }} />
               );
             })()}
             {expanded && g.items.map((it) => {
               const active = it.id === activeId;
-              const col = active ? statusColor.active : statusColor[it.status] || statusColor.pending;
+              // #8d — an unread answer paints the dot accent and blinks it continuously
+              // until read (clearing the card's unread upstream stops the blink). The
+              // active card still wins the accent glow; an unread non-active dot blinks.
+              const col = active ? statusColor.active
+                : it.unread ? 'var(--accent)'
+                : statusColor[it.status] || statusColor.pending;
               return (
                 <button key={it.id} onClick={() => onSelect && onSelect(it.id)} style={{
                   display: 'flex', alignItems: 'center', gap: 11, width: '100%',
@@ -122,7 +150,10 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
                   onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
                 >
                   <span style={{ width: 7, height: 7, borderRadius: 999, background: col, flex: 'none',
-                    boxShadow: active ? '0 0 0 3px var(--accent-dim)' : 'none' }} />
+                    boxShadow: active ? '0 0 0 3px var(--accent-dim)' : 'none',
+                    ...(it.unread && !active
+                      ? { animation: 'loupe-unread-blink 1.4s var(--ease-soft) infinite' }
+                      : null) }} />
                   <span style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
                     <span style={{
                       font: `var(--weight-${active ? 'medium' : 'regular'}) var(--text-sm)/1.2 var(--font-mono)`,

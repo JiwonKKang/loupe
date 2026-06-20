@@ -88,6 +88,10 @@ export default function ReviewScreen(props) {
     verdict, flagged, hasPrev, hasNext,
     onPass, onPrev, onNext, onJumpUnresolved,
     threads, onOpenLine, onResolve, onSend,
+    // #8/#9 shared contract — set of threadId with an arrived AI reply that has
+    // not yet been read (read = expanding that thread). App owns the set; when it
+    // doesn't pass one yet, default to an empty Set so `.has(...)` stays safe.
+    unreadThreads = new Set(),
   } = props;
 
   // Per-thread element refs for the open-thread wrappers, so a newly-opened
@@ -212,7 +216,7 @@ export default function ReviewScreen(props) {
   const codeContentW = Math.ceil(maxChars * chPx + 28);
   // Responsive card width: grows with the actual code length up to a max, so
   // short changes get a compact card and long ones widen toward the cap.
-  const cardW = Math.max(560, Math.min(1140, (62 + codeContentW) * 2 + 6));
+  const cardW = Math.max(760, Math.min(1340, (62 + codeContentW) * 2 + 6));
   const diffRef = React.useRef(null);
   // The two bottom horizontal scrollbars (one per side) are the ONLY horizontal
   // controls. Their onScroll writes a CSS variable (--hs-old / --hs-new) on the
@@ -237,15 +241,23 @@ export default function ReviewScreen(props) {
   const [scrollTop, setScrollTop] = React.useState(0);
   const [viewportH, setViewportH] = React.useState(800);
   const scrollRaf = React.useRef(0);
+  // Latest scrollTop seen since the last commit. #7: the rAF reads THIS (trailing
+  // edge) rather than the value captured when it was scheduled, so a fast scroll
+  // that fires many events inside one frame still commits the FINAL position — not
+  // a stale leading-edge sample. Committing a stale top is what blanks the window
+  // (the slice we render no longer covers the real viewport) and reads as flicker.
+  const pendingTop = React.useRef(0);
   // rAF-throttled vertical scroll: only the OUTER container scrolls vertically
-  // (horizontal scrolling is the bottom hbars writing a CSS variable).
+  // (horizontal scrolling is the bottom hbars writing a CSS variable). We coalesce
+  // a burst of scroll events into one state commit per frame, but always with the
+  // most recent scrollTop (trailing rAF) so virtualization stays in lock-step.
   const onDiffScroll = (e) => {
     if (e.currentTarget !== diffRef.current) return;
-    const top = e.currentTarget.scrollTop;
+    pendingTop.current = e.currentTarget.scrollTop;
     if (scrollRaf.current) return;
     scrollRaf.current = requestAnimationFrame(() => {
       scrollRaf.current = 0;
-      setScrollTop(top);
+      setScrollTop(pendingTop.current);
     });
   };
   React.useEffect(() => () => { if (scrollRaf.current) cancelAnimationFrame(scrollRaf.current); }, []);
@@ -319,7 +331,13 @@ export default function ReviewScreen(props) {
     return lo;
   };
 
-  const OVERPX = 600; // overscan in px above/below the viewport
+  // #7: generous overscan (px above/below the viewport). Rows render in a band
+  // this much taller than the viewport, so a fast flick stays inside the already-
+  // mounted band for several frames before the next commit lands — eliminating the
+  // blank gap (flicker) you'd see when the scroll outruns a tighter band. Paired
+  // with the trailing-rAF commit above and per-row measured heights, the window
+  // stays accurate and deterministic; the only cost is a few extra mounted rows.
+  const OVERPX = 1600; // overscan in px above/below the viewport
   const startIdx = N === 0 ? 0 : firstBelow(scrollTop - OVERPX);
   // At least one item past startIdx so a single tall row (e.g. an open thread)
   // taller than the viewport still renders instead of collapsing to an empty slice.
@@ -402,19 +420,23 @@ export default function ReviewScreen(props) {
   };
   const remaining = total - index - 1;
 
-  // bare thin chevron on the card's side, vertically centered (no box).
-  const NavArrow = ({ side, d, disabled, onClick, label, offset }) => (
+  // #4: bare chevron anchored to the CANVAS edge (the main stage minus the sidebar),
+  // vertically centered — independent of card width. `side` is 'left'/'right' and the
+  // arrow pins ~16px from that edge of the stage container (which is position:relative).
+  // Enlarged hit/visual area (~44×96) with a bigger chevron so the controls read clearly
+  // and never overlap the card center (the stage has horizontal padding reserving room).
+  const NavArrow = ({ side, d, disabled, onClick, label }) => (
     <button onClick={disabled ? undefined : onClick} aria-label={label} title={label} disabled={disabled}
-      style={{ position: 'absolute', zIndex: 3, top: '50%', transform: 'translateY(-50%)',
-        [side]: offset, width: 30, height: 60, padding: 0,
+      style={{ position: 'absolute', zIndex: 5, top: '50%', transform: 'translateY(-50%)',
+        [side]: 16, width: 44, height: 96, padding: 0,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         background: 'transparent', border: 'none',
         color: 'var(--text-secondary)', cursor: disabled ? 'default' : 'pointer',
         opacity: disabled ? 0.12 : 'var(--dim-rest)', transition: 'var(--t-dim), var(--t-hover)' }}
       onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = 'var(--text-primary)'; } }}
       onMouseLeave={(e) => { if (!disabled) { e.currentTarget.style.opacity = 'var(--dim-rest)'; e.currentTarget.style.color = 'var(--text-secondary)'; } }}>
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
     </button>
   );
 
@@ -539,15 +561,23 @@ export default function ReviewScreen(props) {
           )}
         </div>
 
-        {/* Centered card — responsive width, deep shadow (no deck) */}
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center',
-          justifyContent: 'center', padding: '24px var(--canvas-pad)', minHeight: 0 }}>
+        {/* Centered card — responsive width, deep shadow (no deck).
+            #6: cards are wider now, and #4 moved the nav arrows to THIS stage's edges
+            (absolute, ~16px in, ~44px wide → a 60px footprint each side). We replace
+            --canvas-pad with an explicit 76px horizontal padding so the card center
+            always clears that arrow footprint regardless of card width, while keeping
+            the vertical breathing room. This stage is position:relative — the anchor
+            for the edge-pinned arrows below. */}
+        <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', padding: '24px 76px', minHeight: 0 }}>
+
+          {/* #4: side navigation arrows — pinned to the CANVAS edges (this stage
+              container, position:relative), vertically centered, card-width-agnostic. */}
+          <NavArrow side="left" d={chevL} disabled={!hasPrev} onClick={onPrev} label="Previous card" />
+          <NavArrow side="right" d={chevR} disabled={false} onClick={onNext} label="Next card" />
+
           <div style={{ position: 'relative', width: cardW, maxWidth: '100%',
             maxHeight: '100%', display: 'flex' }}>
-
-            {/* side navigation arrows — prev (left) / next (right), vertically centered on the card */}
-            <NavArrow side="left" d={chevL} disabled={!hasPrev} onClick={onPrev} label="Previous card" offset={-56} />
-            <NavArrow side="right" d={chevR} disabled={false} onClick={onNext} label="Next card" offset={-56} />
 
           <div key={card.id} style={{
             position: 'relative', zIndex: 3,
@@ -599,8 +629,13 @@ export default function ReviewScreen(props) {
                   textTransform: 'uppercase', color: 'var(--text-tertiary)', borderLeft: '1px solid var(--border-subtle)' }}>After</div>
               </div>
 
-              <div style={{ padding: '8px 0' }}>
-              <div style={{ height: topPad }} />
+              {/* #7: the rows column + its virtualization spacers all paint the
+                  same --surface-inset as the scroller, so any sub-pixel gap between
+                  an estimated and a measured row height (or a spacer that lands a
+                  fraction off during a fast flick) shows inset, never the card
+                  surface beneath — keeping the diff visually seamless while scrolling. */}
+              <div style={{ padding: '8px 0', background: 'var(--surface-inset)' }}>
+              <div style={{ height: topPad, background: 'var(--surface-inset)' }} />
               {display.slice(startIdx, endIdx).map((item, li) => {
                 const gi = startIdx + li; // global index into `display` (for measurement)
                 if (item.type === 'fold') {
@@ -653,12 +688,14 @@ export default function ReviewScreen(props) {
                         {(thread.side || 'old') === 'old'
                           ? <div style={{ flex: '1 1 0', minWidth: 0, padding: '6px 0 8px 52px' }}>
                               <Thread messages={thread.messages} resolved={thread.resolved}
+                                unread={unreadThreads.has(thread.id)}
                                 collapsed onToggle={() => onOpenLine('old', r)} />
                             </div>
                           : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
                         {(thread.side || 'old') === 'new'
                           ? <div style={{ flex: '1 1 0', minWidth: 0, padding: '6px 0 8px 52px' }}>
                               <Thread messages={thread.messages} resolved={thread.resolved}
+                                unread={unreadThreads.has(thread.id)}
                                 collapsed onToggle={() => onOpenLine('new', r)} />
                             </div>
                           : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
@@ -667,7 +704,7 @@ export default function ReviewScreen(props) {
                   </div>
                 );
               })}
-              <div style={{ height: bottomPad }} />
+              <div style={{ height: bottomPad, background: 'var(--surface-inset)' }} />
               </div>
 
               {/* horizontal scrollbars — one per side, pinned at the bottom. These
