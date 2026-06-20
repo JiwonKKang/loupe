@@ -117,13 +117,18 @@ export function Thread({
           const whoFg = ai ? 'var(--accent)' : 'var(--text-primary)';
           return (
             <div key={i}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3 }}>
-                <span style={{ font: 'var(--weight-semibold) var(--text-xs)/1.2 var(--font-ui)',
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 5 }}>
+                {/* author name larger than the body, so AI vs you reads at a glance */}
+                <span style={{ font: 'var(--weight-semibold) var(--text-base)/1.2 var(--font-ui)',
                   color: whoFg }}>{who}</span>
-                {!ai && <span style={{ font: 'var(--weight-medium) 10px/1 var(--font-ui)', color: accent }}>{label}</span>}
+                {!ai && <span style={{ font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)', color: accent }}>{label}</span>}
               </div>
+              {/* each message sits in its own tinted bubble — you = accent, AI = inset neutral */}
               <div style={{ font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)',
-                color: ai ? 'var(--text-secondary)' : 'var(--text-primary)', textWrap: 'pretty' }}>
+                color: ai ? 'var(--text-secondary)' : 'var(--text-primary)', textWrap: 'pretty',
+                padding: '8px 11px', borderRadius: 'var(--radius-md)',
+                background: ai ? 'var(--surface-inset)' : 'var(--accent-dim)',
+                border: `1px solid ${ai ? 'var(--border-subtle)' : 'var(--accent-line)'}` }}>
                 {ai
                   ? <div className="loupe-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown></div>
                   : m.text}

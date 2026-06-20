@@ -91,6 +91,149 @@ fn clear_token(app: AppHandle) -> Result<(), String> {
     }
 }
 
+/// JSON file holding persisted threads, keyed by `(repo_path, base, target)`.
+///
+/// Stored at `<app_data_dir>/loupe/threads.json` as a single JSON object `{ key: [...] }`.
+/// This lives alongside the SQLite analysis cache but is **independent** of it: clearing the
+/// cache (re-running the AI pipeline) does not touch threads, and vice versa.
+fn threads_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(loupe_dir(app)?.join("threads.json"))
+}
+
+/// Derive the storage key for a thread bucket from the three identifying parts.
+///
+/// The parts are joined with the ASCII Unit Separator (`U+001F`) — a control character that
+/// cannot appear in a branch name or a filesystem path, so distinct `(repo_path, base, target)`
+/// triples can never collide into the same key.
+fn threads_key(repo_path: &str, base: &str, target: &str) -> String {
+    format!("{repo_path}\u{1f}{base}\u{1f}{target}")
+}
+
+/// Read a `threads.json` file into a JSON object, degrading to an empty object on any problem.
+///
+/// A missing file (fresh install), an unreadable file, or corrupt / non-object JSON all map to
+/// an empty `Map` rather than an error: threads are a convenience layer, so a damaged file must
+/// never panic or block the app — it simply reads back as "no saved threads". Pure (path in,
+/// map out) so it is unit-testable without a Tauri `AppHandle`.
+fn read_threads_object_at(path: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return serde_json::Map::new(),
+    };
+    match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// `read_threads_object_at` resolved against the app's `threads.json`. A path-resolution
+/// failure also degrades to an empty object (threads must never block the app).
+fn read_threads_object(app: &AppHandle) -> serde_json::Map<String, serde_json::Value> {
+    match threads_path(app) {
+        Ok(p) => read_threads_object_at(&p),
+        Err(_) => serde_json::Map::new(),
+    }
+}
+
+/// Look up a bucket and render it as the `load_threads` return string (`"[]"` when absent).
+fn load_threads_string(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> String {
+    match obj.get(key) {
+        Some(value) => value.to_string(),
+        None => "[]".to_string(),
+    }
+}
+
+/// Load the persisted thread array for `(repo_path, base, target)`.
+///
+/// The front-end calls `invoke('load_threads', { repoPath, base, target })` (Tauri maps the
+/// camelCase `repoPath` to `repo_path`). Returns the bucket's value re-serialised as a JSON
+/// **string** (the front-end `JSON.parse`s it), or the literal `"[]"` when the file is missing,
+/// corrupt, or has no entry for this key. Never panics: a broken file degrades to `"[]"`.
+#[tauri::command]
+fn load_threads(
+    app: AppHandle,
+    repo_path: String,
+    base: String,
+    target: String,
+) -> Result<String, String> {
+    let obj = read_threads_object(&app);
+    let key = threads_key(&repo_path, &base, &target);
+    Ok(load_threads_string(&obj, &key))
+}
+
+/// Persist the thread array for `(repo_path, base, target)` to `threads.json`.
+///
+/// The front-end calls `invoke('save_threads', { repoPath, base, target, threads })` where
+/// `threads` is `JSON.stringify(threadsArray)`. We parse `threads` and require it to be a JSON
+/// **array** (anything else is a caller bug ⇒ `Err`), then merge it into the existing object
+/// under this key (other keys are preserved) and write the whole object back.
+///
+/// The write is **atomic**: we write a sibling temp file and `rename` it over `threads.json`, so
+/// a crash mid-write can never leave a half-written / corrupt file. On unix the temp file is
+/// `chmod 0o600` before the rename (best-effort, same pattern as `save_token`).
+#[tauri::command]
+fn save_threads(
+    app: AppHandle,
+    repo_path: String,
+    base: String,
+    target: String,
+    threads: String,
+) -> Result<(), String> {
+    let dir = loupe_dir(&app)?;
+    let key = threads_key(&repo_path, &base, &target);
+    save_threads_in_dir(&dir, &key, &threads)
+}
+
+/// Core of `save_threads`, taking the `loupe` directory + derived key directly so it is
+/// unit-testable without a Tauri `AppHandle`. Validates `threads` is a JSON array, merges it
+/// into the existing object under `key` (preserving other buckets), and writes the whole object
+/// back atomically (temp file + rename, 0o600 on unix).
+fn save_threads_in_dir(dir: &std::path::Path, key: &str, threads: &str) -> Result<(), String> {
+    // Validate the payload is a JSON array before touching disk.
+    let parsed: serde_json::Value =
+        serde_json::from_str(threads).map_err(|e| format!("threads is not valid JSON: {e}"))?;
+    if !parsed.is_array() {
+        return Err("threads must be a JSON array".to_string());
+    }
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("could not create threads directory: {e}"))?;
+
+    let path = dir.join("threads.json");
+
+    // Read-modify-write the whole object, preserving other buckets.
+    let mut obj = read_threads_object_at(&path);
+    obj.insert(key.to_string(), parsed);
+
+    let serialized = serde_json::Value::Object(obj).to_string();
+
+    // Atomic write: temp file in the same dir + rename. The temp name is unique per-pid to avoid
+    // clobbering a concurrent writer's temp file.
+    let tmp = dir.join(format!("threads.json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &serialized)
+        .map_err(|e| format!("could not write threads temp file: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+            // Best-effort: the data is written; only the chmod failed.
+            eprintln!("warning: could not set 0o600 on threads file: {e}");
+        }
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        // Clean up the temp file so a failed rename doesn't leave litter behind.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not persist threads: {e}"));
+    }
+
+    Ok(())
+}
+
 /// Verify a model setup-token by making one minimal live call through the `claude` CLI.
 ///
 /// `validate_token` runs first (whitespace / non-ASCII / empty rejected, same rules as
@@ -304,8 +447,75 @@ pub fn run() {
             verify_token,
             save_token,
             load_token,
-            clear_token
+            clear_token,
+            load_threads,
+            save_threads
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// save → load round-trips the exact array, a never-saved key reads back as `"[]"`, and an
+    /// independent key in the same file is preserved across a save.
+    #[test]
+    fn threads_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("threads.json");
+
+        let key_a = threads_key("/repo", "main", "feature");
+        let key_b = threads_key("/repo", "main", "other");
+
+        // A never-saved key degrades to "[]".
+        let empty = read_threads_object_at(&path);
+        assert_eq!(load_threads_string(&empty, &key_a), "[]");
+
+        // Save bucket A, read it back identically.
+        let payload_a = r#"[{"id":"t1","turns":[{"author":"you","text":"hi"}]}]"#;
+        save_threads_in_dir(dir.path(), &key_a, payload_a).unwrap();
+
+        let after_a = read_threads_object_at(&path);
+        let loaded_a = load_threads_string(&after_a, &key_a);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&loaded_a).unwrap(),
+            serde_json::from_str::<serde_json::Value>(payload_a).unwrap()
+        );
+        // A different, never-saved key in the same file still reads "[]".
+        assert_eq!(load_threads_string(&after_a, &key_b), "[]");
+
+        // Save bucket B; bucket A must survive (other buckets preserved).
+        let payload_b = r#"[{"id":"t2"}]"#;
+        save_threads_in_dir(dir.path(), &key_b, payload_b).unwrap();
+
+        let after_b = read_threads_object_at(&path);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&load_threads_string(&after_b, &key_a))
+                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(payload_a).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&load_threads_string(&after_b, &key_b))
+                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(payload_b).unwrap()
+        );
+    }
+
+    /// A non-array payload is rejected, and a corrupt file degrades to an empty object.
+    #[test]
+    fn threads_rejects_non_array_and_degrades_on_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = threads_key("/repo", "a", "b");
+
+        assert!(save_threads_in_dir(dir.path(), &key, r#"{"not":"array"}"#).is_err());
+        assert!(save_threads_in_dir(dir.path(), &key, "not json at all").is_err());
+
+        // Corrupt file → empty object → "[]".
+        let path = dir.path().join("threads.json");
+        std::fs::write(&path, "{ broken json").unwrap();
+        let obj = read_threads_object_at(&path);
+        assert_eq!(load_threads_string(&obj, &key), "[]");
+    }
 }

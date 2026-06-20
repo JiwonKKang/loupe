@@ -97,6 +97,16 @@ export default function App() {
   // Guards a stale analyze_review response from clobbering a newer project's state.
   const analyzeSeq = React.useRef(0);
 
+  // Thread persistence (load_threads/save_threads) is keyed by (repoPath, base, target).
+  // `keyOf` builds that composite key; `loadedKeyRef` records WHICH key's threads have
+  // finished loading. The debounced save only fires when the loaded key matches the
+  // current project — so an empty/in-flight `threads` can never overwrite saved threads
+  // for a project whose load hasn't completed yet (race guard).
+  const keyOf = (rp, b, t) => rp + '' + b + '' + t;
+  const loadedKeyRef = React.useRef(null);
+  // Holds the pending debounced save timer so it can be re-armed / cleared.
+  const saveTimer = React.useRef(null);
+
   // Boot: read the saved model token. With one we go straight to project-picking
   // (the review shell with the menu open); without one we run onboarding. A read
   // failure is non-fatal — fall back to onboarding so the user can (re)connect.
@@ -126,6 +136,10 @@ export default function App() {
     setIndex(0);
     setVerdicts({});
     setThreads([]);
+    // Block the debounced save until this project's threads have actually loaded —
+    // otherwise the empty reset above could overwrite saved threads. Cleared here,
+    // re-set in the load_threads success/failure path below.
+    loadedKeyRef.current = null;
     // Fresh project → drop any pending unread/flash from the previous one.
     setUnreadThreads(new Set());
     setFlashCluster(null);
@@ -144,6 +158,26 @@ export default function App() {
       .then((data) => {
         if (seq !== analyzeSeq.current) return;
         applyAnalysis(data, seq);
+        // Restore saved threads for this exact (repoPath, base, target). This is
+        // independent of analyze_review's cache (hit or miss) — it reads the separate
+        // loupe_dir/threads.json store. Sanitize transient UI fields: pending (AI
+        // thinking) is never persisted-true, and threads always reopen collapsed.
+        invoke('load_threads', { repoPath: r.repoPath, base: r.base, target: r.target })
+          .then((json) => {
+            if (seq !== analyzeSeq.current) return; // a newer project started — drop this
+            let arr;
+            try { arr = JSON.parse(json || '[]'); } catch { arr = []; }
+            if (!Array.isArray(arr)) arr = [];
+            setThreads(arr.map((t) => ({ ...t, pending: false, open: false })));
+            // Mark this key as loaded so the debounced save may now run for it.
+            loadedKeyRef.current = keyOf(r.repoPath, r.base, r.target);
+          })
+          .catch(() => {
+            // A read failure is non-fatal: keep the empty (reset) thread list but still
+            // mark the key loaded so new threads on this project can be saved.
+            if (seq !== analyzeSeq.current) return;
+            loadedKeyRef.current = keyOf(r.repoPath, r.base, r.target);
+          });
       })
       .catch((err) => { if (seq === analyzeSeq.current) { setLoadError(String(err)); setCards([]); } });
   // applyAnalysis is stable (defined below via useCallback); token is read fresh.
@@ -161,6 +195,27 @@ export default function App() {
     setAnalysisState(data.analysis === 'fallback' ? 'fallback' : 'done');
     setLoadError(null);
   }, []);
+
+  // Debounced thread persistence. Whenever `threads` changes we schedule a save 600ms
+  // later (re-armed on each change, so a burst of edits writes once). Race guard: the
+  // save only runs when `loadedKeyRef` matches the CURRENT project key — i.e. this
+  // project's threads have finished loading. Before that (fresh project, threads reset
+  // to []), loadedKeyRef is null and the save is skipped, so the empty list can never
+  // overwrite saved threads. pending is stripped (never persist "AI thinking"); every
+  // other field (model/resolved/messages/lineN/cardId/side/symbol/open/…) is preserved.
+  React.useEffect(() => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    const key = keyOf(repoPath, base, target);
+    saveTimer.current = setTimeout(() => {
+      saveTimer.current = null;
+      if (loadedKeyRef.current !== key) return; // not loaded for this project yet — skip
+      invoke('save_threads', {
+        repoPath, base, target,
+        threads: JSON.stringify(threads.map((t) => ({ ...t, pending: false }))),
+      }).catch(() => {}); // a save failure is non-fatal (in-memory threads stay intact)
+    }, 600);
+    return () => { if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; } };
+  }, [threads, repoPath, base, target]);
 
   // Subscribe once to the engine's pipeline progress events and reduce them into `progress`
   // for the AnalyzeScreen loader. Events are cosmetic — a missed one only affects the loader,
