@@ -489,7 +489,9 @@ async fn label_step_batches_all_clusters_in_one_call() {
     assert_eq!(out.labels.clusters.len(), 2);
     assert_eq!(provider.call_count(), 1, "ALL clusters in ONE batched call (§8.4)");
     let req = provider.last.lock().unwrap().clone().unwrap();
-    assert_eq!(req.tier, ModelTier::Quality, "labelling uses Sonnet (Quality) via CliProvider");
+    // 콜2 = labelling on the Fast tier (Haiku): 라벨/요약은 가벼운 묘사라 Haiku로 빠르게.
+    // (분류/정렬 = combined 콜1 = Sonnet/Quality.)
+    assert_eq!(req.tier, ModelTier::Fast, "labelling (⑥) uses Haiku (Fast) via CliProvider");
     assert_eq!(req.temperature, 0.0);
     assert_eq!(req.system, crate::engine::ai::prompts::LABEL_SYSTEM);
     assert!(req.user.contains("\"clusters\""));

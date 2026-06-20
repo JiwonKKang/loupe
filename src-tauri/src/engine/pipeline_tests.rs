@@ -1,14 +1,15 @@
 //! Stage-④→⑤→⑥ orchestration tests for [`super::run_cluster_pipeline`].
 //!
-//! A sequenced mock provider feeds canned AI replies so the whole pipeline
-//! (combined ④⑤ → batched ⑥, or the split cluster → order → label path) is exercised without a
-//! network or git. The AI is now **2 calls fixed** on a cache miss: ④⑤ combined (1) + ⑥ batched
-//! label (1); only a genuinely large PR (symbols > `COMBINED_MAX_SYMBOLS`) or a combined
-//! length/parse error splits ④⑤ into 3 calls. Assertions cover:
-//!  - the **small/medium PR** clusters + orders in ONE combined call, then ONE batched label
-//!    (2 calls total),
-//!  - the **large PR (> COMBINED_MAX_SYMBOLS)** splits into three calls (cluster, order, label),
-//!  - the **combined parse-error** path degrades to the split path (no error to the caller),
+//! A sequenced mock provider feeds canned AI replies so the whole pipeline (combined ④⑤ →
+//! batched ⑥) is exercised without a network or git. The AI is **always exactly 2 calls** on a
+//! cache miss, for *every* PR size: ④⑤ combined (콜1, Quality/Sonnet) + ⑥ batched label (콜2,
+//! Fast/Haiku). There is no ④⑤ split and no size branch anymore. Assertions cover:
+//!  - **small / medium / large PRs all take the combined path** ⇒ combined(1) + batched label(1)
+//!    = 2 calls (the call count is independent of symbol count),
+//!  - the label (콜2) call goes out on the **Fast** tier (Haiku) while the combined (콜1) call
+//!    goes out on **Quality** (Sonnet),
+//!  - a combined `Err` **propagates** out of the pipeline (so `analyze_clusters_cached`'s ⑩
+//!    `build_fallback_layout` can take over) — no split fallback,
 //!  - the assembled [`super::ClusterLayout`] has the inter-cluster order, each cluster's
 //!    ordered members + filled title/summary/kind, the flat `ordered_card_ids`, and the
 //!    unclustered bucket trailing last,
@@ -35,6 +36,12 @@ struct SeqProvider {
     replies: Mutex<std::collections::VecDeque<Value>>,
     labels: HashMap<String, (String, String)>,
     calls: Mutex<usize>,
+    /// The `ModelTier` each call went out on, in call order. Lets a test assert that the
+    /// combined (콜1) call uses Quality and the label (콜2) call uses Fast.
+    tiers: Mutex<Vec<ModelTier>>,
+    /// The `ModelTier` of the **label** call(s) specifically (detected by the label system
+    /// prompt), so a test can assert ⑥ runs on Fast/Haiku regardless of call ordering.
+    label_tiers: Mutex<Vec<ModelTier>>,
 }
 
 impl SeqProvider {
@@ -50,10 +57,20 @@ impl SeqProvider {
                 .map(|(id, t, s)| (id.to_string(), (t.to_string(), s.to_string())))
                 .collect(),
             calls: Mutex::new(0),
+            tiers: Mutex::new(Vec::new()),
+            label_tiers: Mutex::new(Vec::new()),
         }
     }
     fn call_count(&self) -> usize {
         *self.calls.lock().unwrap()
+    }
+    /// The tiers of all calls, in order (e.g. `[Quality, Fast]` for combined→label).
+    fn tiers(&self) -> Vec<ModelTier> {
+        self.tiers.lock().unwrap().clone()
+    }
+    /// The tier(s) the labelling call(s) went out on.
+    fn label_tiers(&self) -> Vec<ModelTier> {
+        self.label_tiers.lock().unwrap().clone()
     }
 }
 
@@ -92,9 +109,13 @@ fn all_label_clusters(user: &str) -> Vec<(String, Vec<String>)> {
 impl LlmProvider for SeqProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         *self.calls.lock().unwrap() += 1;
+        self.tiers.lock().unwrap().push(req.tier);
         // The labelling system prompt is the only one asking for title/summary (mirrors the
         // discriminator the cache mock uses).
         let is_label = req.system.contains("title") && req.system.contains("summary");
+        if is_label {
+            self.label_tiers.lock().unwrap().push(req.tier);
+        }
         let json = if is_label {
             // Batched label call: answer EVERY cluster the request carried (one reply object).
             let clusters: Vec<Value> = all_label_clusters(&req.user)
@@ -193,6 +214,17 @@ async fn small_pr_takes_combined_branch_then_labels() {
         .expect("pipeline succeeds");
 
     assert_eq!(provider.call_count(), 2, "small PR ⇒ combined(1) + batched label(1) = 2 calls");
+    // 콜1 = combined on Quality(Sonnet), 콜2 = label on Fast(Haiku). Exactly two calls, that order.
+    assert_eq!(
+        provider.tiers(),
+        vec![ModelTier::Quality, ModelTier::Fast],
+        "콜1 combined on Quality, 콜2 label on Fast"
+    );
+    assert_eq!(
+        provider.label_tiers(),
+        vec![ModelTier::Fast],
+        "labelling (⑥) goes out on the Fast/Haiku tier"
+    );
     assert_eq!(layout.clusters.len(), 1);
     let c = &layout.clusters[0];
     assert_eq!(c.id, "k1");
@@ -207,10 +239,10 @@ async fn small_pr_takes_combined_branch_then_labels() {
 
 #[tokio::test]
 async fn medium_pr_still_combined_and_orders_across_clusters() {
-    // 13 symbols: > SMALL_PR_SYMBOLS(12) but ≤ COMBINED_MAX_SYMBOLS(48) ⇒ the COMBINED path is
-    // still the default (the combine/split switch is COMBINED_MAX_SYMBOLS now). So this is
-    // combined(1) + batched label(1) = 2 calls, NOT a 3-call split. The combined reply carries
-    // two clusters with already-ordered members + clusterOrder, exercising cross-cluster order.
+    // 13 symbols — a "medium" PR. The pipeline always takes the combined ④⑤ path regardless of
+    // size, so this is combined(1) + batched label(1) = 2 calls (never a 3-call split — that path
+    // is gone). The combined reply carries two clusters with already-ordered members +
+    // clusterOrder, exercising cross-cluster order through the single combined call.
     let names: Vec<(&str, &str)> = vec![
         ("a", "handleLogin"), ("b", "validateToken"), ("c", "saveSession"),
         ("d", "kakaoFetch"), ("e", "mapProfile"), ("f", "upsertUser"),
@@ -245,7 +277,12 @@ async fn medium_pr_still_combined_and_orders_across_clusters() {
     assert_eq!(
         provider.call_count(),
         2,
-        "medium PR (13 ≤ COMBINED_MAX_SYMBOLS) ⇒ combined(1) + batched label(1) = 2 calls"
+        "medium PR ⇒ combined(1) + batched label(1) = 2 calls (size doesn't add calls)"
+    );
+    assert_eq!(
+        provider.tiers(),
+        vec![ModelTier::Quality, ModelTier::Fast],
+        "콜1 combined on Quality, 콜2 label on Fast — even for a medium PR"
     );
     assert_eq!(layout.cluster_order, vec!["k1".to_string(), "k2".to_string()]);
     // k2's members came back reordered as h,g (combined memberCardIds are already ordered).
@@ -265,32 +302,25 @@ async fn medium_pr_still_combined_and_orders_across_clusters() {
 }
 
 #[tokio::test]
-async fn large_pr_over_combined_cap_splits_into_three_calls() {
-    // > COMBINED_MAX_SYMBOLS(48) symbols ⇒ a genuinely large PR forces the ④⑤ SPLIT path:
-    // cluster_step(1) + order_step(1) + batched label(1) = 3 calls. (Two combined-shaped
-    // replies are NOT consumed; the split path reads a clustering reply then an ordering reply.)
+async fn large_pr_still_takes_combined_path_in_two_calls() {
+    // 49 symbols — a large PR. There is NO split anymore: the single combined ④⑤ call handles it
+    // (its output cap was raised to hold a big PR's id-list structure), so it is still
+    // combined(1) + batched label(1) = 2 calls, NOT a 3-call split. ONE combined reply carries
+    // all 49 ids (in id order so verify_order's permutation check passes) + clusterOrder.
     let names: Vec<(String, String)> = (0..49)
         .map(|i| (format!("c{i}"), format!("sym{i}")))
         .collect();
     let pairs: Vec<(&str, &str)> = names.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
     let cards = vec![card("seed-1", &pairs)];
 
-    // Cluster all 49 into one cluster k1 (members in id order) so verify_order's permutation
-    // check passes; ordering returns the same membership.
     let all_ids: Vec<String> = names.iter().map(|(a, _)| a.clone()).collect();
     let provider = SeqProvider::with_labels(
         vec![
-            // clustering reply (split path, step 1).
+            // ONE combined reply: all 49 in cluster k1 (already-ordered members) + clusterOrder.
             json!({
                 "clusters": [ { "clusterId": "k1", "memberCardIds": all_ids, "kind": "flow" } ],
-                "unclustered": []
-            }),
-            // ordering reply (split path, step 2) — permutation of k1's members.
-            json!({
-                "clusterOrder": ["k1"],
-                "orderedByCluster": [
-                    { "clusterId": "k1", "cardIds": names.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>() }
-                ]
+                "unclustered": [],
+                "clusterOrder": ["k1"]
             }),
         ],
         &[("k1", "대규모 변경", "Large change.")],
@@ -302,8 +332,13 @@ async fn large_pr_over_combined_cap_splits_into_three_calls() {
 
     assert_eq!(
         provider.call_count(),
-        3,
-        "large PR (> COMBINED_MAX_SYMBOLS) ⇒ cluster(1) + order(1) + batched label(1) = 3 calls"
+        2,
+        "large PR ⇒ combined(1) + batched label(1) = 2 calls (no split, regardless of size)"
+    );
+    assert_eq!(
+        provider.tiers(),
+        vec![ModelTier::Quality, ModelTier::Fast],
+        "콜1 combined on Quality, 콜2 label on Fast — even for a large PR"
     );
     assert_eq!(layout.clusters.len(), 1);
     assert_eq!(layout.ordered_card_ids.len(), 49, "every changed symbol appears once");
@@ -311,52 +346,36 @@ async fn large_pr_over_combined_cap_splits_into_three_calls() {
 }
 
 #[tokio::test]
-async fn combined_parse_error_falls_back_to_split() {
-    // The PR fits the combined cap (3 symbols), so the combined call is *attempted* — but it
-    // returns an unparseable body (modeling a truncated/length-error mega-output). The
-    // orchestrator must degrade to the ④⑤ SPLIT path rather than fail: a malformed combined
-    // reply, then a clustering reply, then an ordering reply, then a batched label =
-    // 1 (failed combined, retried once = 2 provider calls) + cluster(1) + order(1) + label(1).
-    // We assert the layout is correct and that the split path actually ran (the clustering +
-    // ordering replies were consumed).
+async fn combined_error_propagates_so_stage10_fallback_can_take_over() {
+    // The combined ④⑤ call returns an unparseable body (modeling a truncated/length-error
+    // mega-output). With the split path removed, the orchestrator must NOT silently degrade — it
+    // propagates the `Err` so `analyze_clusters_cached`'s ⑩ `build_fallback_layout` (AI-0-call)
+    // can take over. The pipeline retries the combined call once (2 provider calls), then errors;
+    // no label call is ever made (the label reply below is never consumed).
     let cards = vec![card("seed-1", &[("a", "create"), ("b", "validate"), ("c", "save")])];
     let provider = SeqProvider::with_labels(
         vec![
             // combined attempt #1: malformed (missing required `clusters`) ⇒ Parse error.
             json!({ "garbage": true }),
-            // combined attempt #2 (one retry): still malformed ⇒ Parse error ⇒ split fallback.
+            // combined attempt #2 (one retry): still malformed ⇒ Parse error ⇒ Err propagates.
             json!({ "garbage": true }),
-            // split path step 1 — clustering.
-            json!({
-                "clusters": [ { "clusterId": "k1", "memberCardIds": ["a", "b", "c"], "kind": "flow" } ],
-                "unclustered": []
-            }),
-            // split path step 2 — ordering (permutation of k1).
-            json!({
-                "clusterOrder": ["k1"],
-                "orderedByCluster": [ { "clusterId": "k1", "cardIds": ["a", "b", "c"] } ]
-            }),
         ],
         &[("k1", "생성 흐름", "Creates, validates, saves.")],
     );
 
-    let layout = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &())
-        .await
-        .expect("pipeline succeeds via split fallback");
+    let result = run_cluster_pipeline(&provider, &cards, &RelationHints::default(), &()).await;
 
-    // 2 failed combined attempts + cluster(1) + order(1) + batched label(1) = 5 provider calls.
+    assert!(
+        matches!(result, Err(LlmError::Parse(_))),
+        "a malformed combined reply propagates as Err (⑩ build_fallback_layout receives it), got {result:?}"
+    );
+    // The combined call was attempted twice (one retry); the pipeline never reached labelling.
     assert_eq!(
         provider.call_count(),
-        5,
-        "combined retried once (2), then split cluster(1)+order(1)+label(1) = 5 provider calls"
+        2,
+        "combined attempted twice then errored — no ⑥ label call (0 label calls)"
     );
-    assert_eq!(layout.clusters.len(), 1);
-    let c = &layout.clusters[0];
-    assert_eq!(c.id, "k1");
-    assert_eq!(c.ordered_card_ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
-    assert_eq!(c.title, "생성 흐름");
-    assert_eq!(layout.ordered_card_ids, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
-    assert!(layout.unclustered.is_empty());
+    assert!(provider.label_tiers().is_empty(), "labelling never ran on a combined failure");
 }
 
 /// A file seed-card: a singleton whose member card_id is a `<path>::__file` id and whose

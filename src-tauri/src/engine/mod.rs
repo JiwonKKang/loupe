@@ -311,20 +311,18 @@ pub struct ClusterLayout {
 ///  2. [`analyze_relations`] → strong-seed first-pass clusters + relation hints.
 ///  3. [`clustercard::build_cluster_cards`] → one refined `ClusterCardInput` per seed
 ///     (no raw diff; short summaries only — input-size defence).
-///  4+5. **Default: one combined call** clusters AND orders
-///     ([`ai::steps::cluster_and_order_combined`], planning §4.1) for small *and* medium PRs.
-///     A genuinely large PR (symbols > [`ai::steps::COMBINED_MAX_SYMBOLS`]) — or a combined
-///     call that returns a length/parse error — splits into two calls
-///     ([`ai::steps::cluster_step`] then [`ai::steps::order_step`]). Both are whitelist-
-///     verified (hallucination reject; omitted ids absorbed; ordering = permutation).
-///  6. [`ai::steps::label_step`] → ONE batched title/summary call for all clusters,
-///     B1-safe + M4 token-checked (§6.2 / §8.4).
+///  4+5. **콜1 — always one combined call** clusters AND orders
+///     ([`ai::steps::cluster_and_order_combined`], Sonnet/Quality) for **every** PR size:
+///     membership + ordering (structure) in a single call, whitelist-verified (hallucination
+///     reject; omitted ids absorbed; ordering = permutation). No size branch, no ④⑤ split.
+///  6. **콜2** — [`ai::steps::label_step`] (Haiku/Fast) → ONE batched title/summary call for
+///     all clusters + per-card summaries, B1-safe + M4 token-checked (§6.2 / §8.4).
 ///
-/// **AI calls are 2 fixed on a cache miss**: ④⑤ combined (1) + ⑥ batched (1). Only a large /
-/// over-budget PR pays a 3rd call for the ④⑤ split.
+/// **AI calls are always exactly 2 on a cache miss**: ④⑤ combined (1) + ⑥ batched label (1).
 ///
-/// On AI failure (after each step's one retry) the `Err` propagates so a caller can fall
-/// back; this function does not itself implement the layer-heuristic fallback (Stage-⑩).
+/// On a combined `Err` (after its one retry) the error propagates so the caller falls back;
+/// this function does not itself implement the layer-heuristic fallback (Stage-⑩). Label
+/// failures are absorbed inside `label_step` (retry + B1 backfill) and never propagate.
 pub async fn analyze_clusters(
     provider: &dyn ai::LlmProvider,
     repo_path: &str,
@@ -626,42 +624,34 @@ fn cards_set_hash(cards: &[clustercard::ClusterCardInput]) -> String {
 pub async fn run_cluster_pipeline(
     provider: &dyn ai::LlmProvider,
     cards: &[clustercard::ClusterCardInput],
-    hints: &relations::RelationHints,
+    // `hints` fed the (now-removed) ④⑤ split path's `order_step`. The combined colN-1 call
+    // carries already-ordered `memberCardIds`, so the orchestrator no longer needs the hints
+    // here — kept in the signature so callers (`analyze_clusters`) stay source-compatible.
+    _hints: &relations::RelationHints,
     progress: &dyn ProgressSink,
 ) -> Result<ClusterLayout, ai::LlmError> {
     use ai::steps;
-
-    let whitelist = steps::whitelist_of(cards);
 
     // Deterministic static work (parse + relations + cluster cards) is done by the time we get
     // here; everything below is AI. Tell the loader so it can complete "Static analysis" and
     // show "Clustering" as the active phase, instead of hiding the ④⑤ wait under "static".
     progress.emit(Progress::Clustering);
 
-    // ④+⑤: the **combined** call is the default (small *and* medium PRs) so a cache-miss
-    // analysis is ④⑤(1) + ⑥(1) = 2 AI calls. We split into `cluster_step` + `order_step` (3
-    // calls total) ONLY when:
-    //   (a) the PR is genuinely large — symbol count > COMBINED_MAX_SYMBOLS (`combined_fits`
-    //       false), so a single combined output would risk truncation/verify churn; or
-    //   (b) the combined call *would* fit but came back with a length/parse error
-    //       (`LlmError::Parse` — truncated mega-output or malformed JSON): we degrade to the
-    //       split path rather than fail. Transport errors (Auth/Overloaded/Timeout/Http/
-    //       Refusal) are infrastructural — splitting won't help — so those propagate.
+    // ④+⑤ = **콜1**: ALWAYS one combined `cluster_and_order_combined` call (Sonnet/Quality) —
+    // clustering membership + ordering (the structural work) in a single call, for every PR size.
+    // No size branch and no ④⑤ split: the combined call handles large PRs alone now that
+    // `COMBINED_MAX_TOKENS` gives its (compact id-list) output ample room. The pipeline is fixed
+    // at 2 AI calls on a cache miss — ④⑤ combined (1) + ⑥ batched label (2).
+    //
+    // A combined `Err` (transport OR Parse/length) **propagates** via `?`: there is no split
+    // fallback here. `analyze_clusters_cached` catches it and runs `build_fallback_layout`
+    // (Stage-⑩, the AI-0-call layer heuristic) so the user still gets a layout. (Label failures
+    // are handled *inside* `label_step` via retry + B1 backfill — they never surface here.)
+    //
     // As soon as membership is known we tell the loader which clusters it will review (spinning)
     // so the queue rail can appear before the reviews come back. `Progress::Clusters` is emitted
     // exactly once, after the structure is final, with the same fields as before.
-    let (clustering, ordering) = if steps::combined_fits(cards) {
-        match steps::cluster_and_order_combined(provider, cards).await {
-            Ok(pair) => pair,
-            // Length/parse failure on the combined call ⇒ split fallback (still no error to the
-            // caller). A transport error is surfaced so the caller can retry/back off.
-            Err(ai::LlmError::Parse(_)) => cluster_then_order(provider, cards, hints, &whitelist).await?,
-            Err(e) => return Err(e),
-        }
-    } else {
-        // Genuinely large PR: split ④⑤ so each output stays small/verifiable (3-call path).
-        cluster_then_order(provider, cards, hints, &whitelist).await?
-    };
+    let (clustering, ordering) = steps::cluster_and_order_combined(provider, cards).await?;
     progress.emit(Progress::Clusters {
         clusters: progress_clusters(&clustering, cards),
     });
@@ -728,20 +718,6 @@ pub async fn run_cluster_pipeline(
     // All clusters reviewed → the final ordering/assembly pass.
     progress.emit(Progress::Final);
     Ok(assemble_layout(clustering, ordering, label_outcome, card_summaries, cards))
-}
-
-/// ④⑤ **split** path: cluster (one call) then order (one call). Factored out of
-/// [`run_cluster_pipeline`] so it serves both the genuinely-large-PR branch and the
-/// length/parse-error fallback from a combined call.
-async fn cluster_then_order(
-    provider: &dyn ai::LlmProvider,
-    cards: &[clustercard::ClusterCardInput],
-    hints: &relations::RelationHints,
-    whitelist: &std::collections::BTreeSet<String>,
-) -> Result<(ai::steps::ClusterResult, ai::steps::OrderResult), ai::LlmError> {
-    let clustering = ai::steps::cluster_step(provider, cards).await?;
-    let ordering = ai::steps::order_step(provider, &clustering, hints, whitelist).await?;
-    Ok((clustering, ordering))
 }
 
 /// Build the loader's provisional cluster list from the clustering result: each cluster's id,

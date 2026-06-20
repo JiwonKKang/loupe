@@ -50,33 +50,42 @@ use std::collections::{BTreeMap, BTreeSet};
 /// [`combined_fits`]). Kept as a documented label of "small" rather than dead-code.
 pub const SMALL_PR_SYMBOLS: usize = 12;
 
-/// Upper bound (in changed symbols) on running ④+⑤ as ONE combined `cluster_and_order_combined`
-/// call. The combined call is the **default** path for small *and* medium PRs so a cache-miss
-/// analysis is `④⑤(1) + ⑥(1) = 2` AI calls; only a genuinely large PR (symbol count above this)
-/// splits ④⑤ into two calls so each output stays small/verifiable (`= 3` calls then).
-///
-/// Budget rationale (why 48, not "as big as possible"): the combined call is capped at
-/// [`COMBINED_MAX_TOKENS`] = 4096 *output* tokens, and its output is one `memberCardIds` entry +
-/// one `clusterId` per cluster plus the `clusterOrder` — i.e. roughly **one short id string per
-/// changed symbol, twice** (once in a cluster, once implied by order), as JSON. At ~10–15 output
-/// tokens per id-with-JSON-punctuation, 48 symbols ⇒ ~700–1000 output tokens for the structure,
-/// comfortably inside 4096 with headroom for cluster wrappers/kinds and the model's slack. The
-/// *input* side (seed cards, no diff bodies — Stage-③ input-size defence) scales with symbol
-/// count too; 48 keeps the single prompt well within a Sonnet context with the system prompt and
-/// schema. Above 48 the truncation/verify-retry risk on a single mega-output outweighs the
-/// 1-call latency win, so we pay the extra call and split. (Conservative; tune up only with
-/// evidence of clean combined runs at higher counts.)
+/// **Historic** combine/split threshold (in changed symbols). When the pipeline still split ④⑤
+/// for large PRs, a count above this forced the `cluster_step` + `order_step` path; at or below
+/// it the combined call ran alone. The split has since been removed — the combined call
+/// ([`cluster_and_order_combined`]) is now the *only* ④⑤ path for **every** PR size (its output
+/// cap, [`COMBINED_MAX_TOKENS`], was raised to hold a large PR's structure), so this constant no
+/// longer gates anything in `run_cluster_pipeline`. Retained as documented vocabulary and for the
+/// `combined_fits` back-compat unit test; `#[allow(dead_code)]` since it has no lib-build caller.
+#[allow(dead_code)]
 pub const COMBINED_MAX_SYMBOLS: usize = 48;
 
 /// Max tokens for the clustering call. Output is small (id lists + a kind enum), so this
-/// is generous headroom, not a real limit.
+/// is generous headroom, not a real limit. **No longer on the pipeline path** (the ④⑤ split was
+/// removed; the combined call is the only ④⑤ path) — retained for the `cluster_step` tests.
+#[allow(dead_code)]
 const CLUSTER_MAX_TOKENS: u32 = 4096;
 
-/// Max tokens for the ordering call (id permutations only — small output).
+/// Max tokens for the ordering call (id permutations only — small output). **No longer on the
+/// pipeline path** (see [`CLUSTER_MAX_TOKENS`]) — retained for the `order_step` tests.
+#[allow(dead_code)]
 const ORDER_MAX_TOKENS: u32 = 4096;
 
-/// Max tokens for the combined cluster+order call (small PRs only, still small output).
-const COMBINED_MAX_TOKENS: u32 = 4096;
+/// Max tokens for the combined cluster+order call (**콜1**, now the *only* ④⑤ path for every
+/// PR size — the split was removed, so this single call must hold a large PR's whole structure).
+///
+/// Budget rationale (8192, not just 4096): the output is compact — per cluster one
+/// `memberCardIds` id-list + a `clusterId` + a `kind`, plus the `clusterOrder` id list. That's
+/// roughly "one short id string per changed symbol, twice" (once in a cluster, once in order) as
+/// JSON, ~10–15 output tokens per id-with-punctuation. At 4096 a very large PR (≫48 symbols)
+/// could *truncate* the JSON and trip the parse/verify path, which now has **no split fallback**
+/// (a truncated combined call propagates `Err` → Stage-⑩ AI-0-call fallback). Doubling to 8192
+/// covers ~300–500 symbols of structure with headroom for cluster wrappers/kinds and model
+/// slack, while staying far inside a Sonnet context. Output is still id-lists+order (no diff
+/// bodies), so the larger cap costs nothing on typical PRs — it only removes the truncation cliff
+/// for the rare big one. (Conservative; raise further only with evidence of clean runs at higher
+/// counts.)
+const COMBINED_MAX_TOKENS: u32 = 8192;
 
 /// Max tokens for the labelling call. Title + 1–3-sentence summary per cluster for *all*
 /// clusters in one batch — larger than the id-only calls, but bounded by cluster count.
@@ -211,20 +220,18 @@ pub fn is_small_pr(cards: &[ClusterCardInput]) -> bool {
     total_symbols(cards) <= SMALL_PR_SYMBOLS
 }
 
-/// Whether ④+⑤ should run as ONE combined call (the default) rather than split into two.
+/// **Historic** combine/split predicate: whether ④+⑤ fit in ONE combined call (≤
+/// [`COMBINED_MAX_SYMBOLS`]) rather than splitting into `cluster_step` + `order_step`.
 ///
-/// True when the total changed-symbol count is ≤ [`COMBINED_MAX_SYMBOLS`]: small and medium PRs
-/// take the combined path so a cache-miss analysis is `④⑤(1) + ⑥(1) = 2` AI calls. A genuinely
-/// large PR (count above the bound) returns `false` so the orchestrator splits ④⑤ into
-/// `cluster_step` + `order_step` (each output small/verifiable) — the `= 3`-call path. The
-/// orchestrator *also* falls back to the split path if a combined call returns a length/parse
-/// error even when this predicate is true (a truncated mega-output); see
-/// [`crate::engine::run_cluster_pipeline`].
+/// The split was removed — the combined call is now the *only* ④⑤ path for every PR size — so the
+/// orchestrator no longer consults this. Retained for the back-compat unit test;
+/// `#[allow(dead_code)]` because it has no lib-build caller anymore.
+#[allow(dead_code)]
 pub fn combined_fits(cards: &[ClusterCardInput]) -> bool {
     total_symbols(cards) <= COMBINED_MAX_SYMBOLS
 }
 
-/// Run the AI clustering (seed-correction) step.
+/// Run the AI clustering (seed-correction) step (the ④ half of the removed ④⑤ **split** path).
 ///
 /// Builds the whitelist from the input cards' card ids, sends one structured request, and
 /// verifies the result. On verification failure, retries once; a second failure is `Err`.
@@ -232,6 +239,12 @@ pub fn combined_fits(cards: &[ClusterCardInput]) -> bool {
 /// Sonnet에 HTTP 429를 반환하지만 claude CLI 경유로 Sonnet 호출이 가능하므로, 분류는 Sonnet
 /// 품질·결정성으로 수행하고 재현성은 temperature=0으로 보강한다. Empty input ⇒ an empty result
 /// (no network call).
+///
+/// **No longer on the pipeline path** — `run_cluster_pipeline` always uses the combined
+/// [`cluster_and_order_combined`] call now (the split was removed). Retained for the
+/// `cluster_step` unit tests and the live `#[ignore]` repro; `#[allow(dead_code)]` so the
+/// test-only function (and its prompt/schema/`attempt_once` deps) don't warn in the lib build.
+#[allow(dead_code)]
 pub async fn cluster_step(
     provider: &dyn LlmProvider,
     cards: &[ClusterCardInput],
@@ -314,6 +327,12 @@ fn build_user_message(cards: &[ClusterCardInput]) -> String {
 ///
 /// Quality (Sonnet) tier via `CliProvider` + temperature=0 (재현성). An empty / single-id
 /// clustering needs no model call — the order is already determined, so it short-circuits.
+///
+/// **No longer on the pipeline path** — the ⑤ half of the removed ④⑤ split; ordering now comes
+/// from the combined call's already-ordered `memberCardIds`. Retained for the `order_step` unit
+/// tests; `#[allow(dead_code)]` so the test-only function (and its `identity_order` /
+/// `order_attempt_once` / `build_order_message` / prompt+schema deps) don't warn in the lib build.
+#[allow(dead_code)]
 pub async fn order_step(
     provider: &dyn LlmProvider,
     clusters: &ClusterResult,
@@ -547,8 +566,10 @@ pub struct LabelOutcome {
 ///  - **M4**: code-identifier tokens in the text not present in the input are reported in
 ///    `LabelOutcome::suspicious` (a re-request hook; not fatal).
 ///
-/// Quality (Sonnet) tier via `CliProvider` + temperature=0 (요약은 0~0.3 가능하나 일단 0
-/// 통일). Retries once on a parse failure. Empty input ⇒ empty labels, no call.
+/// **콜2 = Fast (Haiku) tier** via `CliProvider` + temperature=0 (요약은 0~0.3 가능하나 일단 0
+/// 통일). 라벨/요약은 클러스터링·정렬 결과를 *묘사*하는 가벼운 작업이라 Haiku로 빠르게 처리한다
+/// (분류·정렬 = 콜1 combined는 Sonnet/Quality 유지). Retries once on a parse failure. Empty
+/// input ⇒ empty labels, no call.
 pub async fn label_step(
     provider: &dyn LlmProvider,
     clusters: &[LabelInput],
@@ -572,8 +593,11 @@ pub async fn label_step(
     let mut last_err: Option<LlmError> = None;
     for _attempt in 0..2 {
         let req = CompletionRequest {
-            // Quality(Sonnet) via CliProvider — 요약도 Sonnet 품질.
-            tier: ModelTier::Quality,
+            // **콜2 = Haiku(Fast) via CliProvider.** 라벨/요약(제목·1~3문장 요약·카드별 요약)은
+            // 클러스터 멤버십/정렬 결과를 *묘사*하는 가벼운 작업이라 Haiku로 빠르게 처리한다.
+            // 분류·정렬(콜1 combined)은 구조를 *결정*하는 작업이라 Sonnet(Quality) 유지.
+            // B1·M4·재현성(temp=0)·retry·backfill 로직은 tier와 무관하게 그대로다.
+            tier: ModelTier::Fast,
             system: LABEL_SYSTEM.to_string(),
             user: user.clone(),
             max_tokens: LABEL_MAX_TOKENS,
