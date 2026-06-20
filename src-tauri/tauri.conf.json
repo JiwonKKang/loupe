@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "loupe",
-        "width": 800,
-        "height": 600
+        "title": "Loupe",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 940,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {
