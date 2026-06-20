@@ -2,6 +2,95 @@ mod engine;
 
 use tauri::{AppHandle, Emitter, Manager};
 
+/// Validate a model setup-token, returning the trimmed value on success.
+///
+/// A `claude setup-token` is a single ASCII string with no spaces (sk-ant-oat01-…). A value
+/// with whitespace or non-ASCII characters is a paste error (e.g. a card summary landed in
+/// the token field). Empty is rejected too. Shared by `analyze_review` (so a bad value never
+/// reaches `CLAUDE_CODE_OAUTH_TOKEN` and surfaces as a cryptic CLI "invalid header value")
+/// and by `save_token` (so we never persist garbage). The token itself is **never logged**.
+fn validate_token(token: &str) -> Result<String, String> {
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Err("missing model token — finish onboarding first".to_string());
+    }
+    if token.chars().any(|c| c.is_whitespace() || !c.is_ascii()) {
+        return Err(
+            "model token looks invalid (it contains spaces or non-ASCII characters). Re-run \
+             `claude setup-token` and paste the sk-ant-… value into onboarding."
+                .to_string(),
+        );
+    }
+    Ok(token)
+}
+
+/// `<app_data_dir>/loupe`, the same directory `analyze_review` uses for its SQLite cache.
+fn loupe_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve app data dir: {e}"))?
+        .join("loupe"))
+}
+
+/// Plaintext file holding the persisted model setup-token (unix perms 0o600).
+fn token_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(loupe_dir(app)?.join("model-token"))
+}
+
+/// Persist the model setup-token as plaintext at `<app_data_dir>/loupe/model-token`.
+///
+/// The token is validated first (same rules as `analyze_review`); an invalid value is rejected
+/// rather than written. On unix the file is `chmod 0o600` (owner read/write only) — best-effort:
+/// if `set_permissions` fails (e.g. an exotic filesystem), the token stays written and we only
+/// log that the permission tightening did not apply. The token itself is **never logged**.
+#[tauri::command]
+fn save_token(app: AppHandle, token: String) -> Result<(), String> {
+    let token = validate_token(&token)?;
+
+    let dir = loupe_dir(&app)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create token directory: {e}"))?;
+    let path = dir.join("model-token");
+    std::fs::write(&path, &token).map_err(|e| format!("could not write token: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            // Best-effort: the token is already written; only the chmod failed. Never log the
+            // token, only the perms error.
+            eprintln!("warning: could not set 0o600 on token file: {e}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Load the persisted model setup-token. Returns `None` when no token file exists (fresh
+/// install / after `clear_token`), `Some(trimmed)` when present, and `Err` only on a real read
+/// failure. The token itself is **never logged**.
+#[tauri::command]
+fn load_token(app: AppHandle) -> Result<Option<String>, String> {
+    let path = token_path(&app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents.trim().to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read token: {e}")),
+    }
+}
+
+/// Remove the persisted model setup-token. A missing file is treated as success (idempotent).
+#[tauri::command]
+fn clear_token(app: AppHandle) -> Result<(), String> {
+    let path = token_path(&app)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not clear token: {e}")),
+    }
+}
+
 /// Re-emits engine pipeline milestones over the `analyze://progress` Tauri event so the
 /// front-end `AnalyzeScreen` can mirror the real stages live. Holds a clone of the app handle;
 /// `emit` is best-effort (a dropped event only affects the loader, never the result).
@@ -46,28 +135,10 @@ async fn analyze_review(
     target: String,
     token: String,
 ) -> Result<engine::ReviewData, String> {
-    let token = token.trim().to_string();
-    if token.is_empty() {
-        return Err("missing model token — finish onboarding first".to_string());
-    }
-    // A `claude setup-token` is a single ASCII string with no spaces (sk-ant-oat01-…). A value
-    // with whitespace or non-ASCII characters is a paste error (e.g. a card summary landed in
-    // the token field). Catch it here with an actionable message — otherwise the bad value
-    // reaches `CLAUDE_CODE_OAUTH_TOKEN` and surfaces as a cryptic CLI "invalid header value".
-    if token.chars().any(|c| c.is_whitespace() || !c.is_ascii()) {
-        return Err(
-            "model token looks invalid (it contains spaces or non-ASCII characters). Re-run \
-             `claude setup-token` and paste the sk-ant-… value into onboarding."
-                .to_string(),
-        );
-    }
+    let token = validate_token(&token)?;
 
     // <app_data_dir>/loupe (created on demand by the cache layer).
-    let cache_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("could not resolve app data dir: {e}"))?
-        .join("loupe");
+    let cache_dir = loupe_dir(&app)?;
 
     // CliProvider holds the setup-token (Sonnet via the `claude` CLI). `token` is moved in and
     // never logged. The trait object is what the engine consumes.
@@ -109,7 +180,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_review,
             analyze_review,
-            list_branches
+            list_branches,
+            save_token,
+            load_token,
+            clear_token
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

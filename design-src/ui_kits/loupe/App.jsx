@@ -6,6 +6,18 @@ function App() {
   const [index, setIndex] = React.useState(2);
   const [treeOpen, setTreeOpen] = React.useState(false);
   const [dir, setDir] = React.useState(1);
+  // Project + branch range live at the app level (the token is set once in
+  // onboarding; the project is chosen anytime from the top-left menu).
+  const [project, setProject] = React.useState('monorepo / api');
+  const [base, setBase] = React.useState('main');
+  const [target, setTarget] = React.useState('agent/refactor-auth');
+  const changeProject = (next) => {
+    if (next.project) setProject(next.project);
+    if (next.base) setBase(next.base);
+    if (next.target) setTarget(next.target);
+    setIndex(0); setDir(1);
+    setScreen('loading'); // re-run the analysis pipeline for the new range
+  };
   const [verdicts, setVerdicts] = React.useState({ decodeJSON: 'pass', handleLogin: 'pass' });
   const [threads, setThreads] = React.useState([
     { id: 't1', cardId: 'validate', side: 'old', lineN: 2, symbol: 'Session.Validate', open: false, resolved: false,
@@ -114,7 +126,8 @@ function App() {
       {screen === 'review' && (
         <ReviewScreen
           card={card} index={index} total={cards.length} dir={dir}
-          base="main" target="agent/refactor-auth" unresolved={unresolved}
+          project={project} base={base} target={target} onChangeProject={changeProject}
+          unresolved={unresolved}
           onOpenSummary={() => setScreen('summary')}
           spineItems={spineItems} onSelect={(id) => { const i = cards.findIndex((c) => c.id === id); goTo(i, i > index ? 1 : -1); }}
           verdict={verdicts[card.id]} flagged={hasUnresolved(card.id)}

@@ -8,11 +8,12 @@ import { ProgressSpine } from '../components/ProgressSpine';
 import { Thread } from '../components/Thread';
 import { Button } from '../components/Button';
 import { KeyHint } from '../components/KeyHint';
+import ProjectMenu from '../components/ProjectMenu';
 import { highlightGo } from '../data/fixtures';
 
 export default function ReviewScreen(props) {
   const {
-    card, index, total, dir, base, target, unresolved,
+    card, index, total, dir, project, base, target, onChangeProject, unresolved,
     cluster, clusterIndex, analysisState,
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
@@ -204,7 +205,10 @@ export default function ReviewScreen(props) {
       <div style={{ flex: 1, position: 'relative', display: 'flex',
         flexDirection: 'column', minWidth: 0 }}>
 
-        {/* Minimal top bar — progress · chapter · base→target */}
+        {/* Top-left project / branch menu — switch projects anytime */}
+        <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} />
+
+        {/* Minimal top bar — progress · chapter */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
           gap: 12, padding: '26px 0 0', opacity: 'var(--dim-rest)',
           font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
@@ -224,11 +228,6 @@ export default function ReviewScreen(props) {
               clustering…
             </span>
           )}
-          <span style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--text-faint)' }} />
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7,
-            font: 'var(--text-xs)/1 var(--font-mono)', color: 'var(--text-tertiary)' }}>
-            {base}<span style={{ color: 'var(--text-faint)' }}><Ico d={arrow} w={13} /></span>{target}
-          </span>
         </div>
 
         {/* Centered card — with a faint deck of remaining cards peeking to the RIGHT */}

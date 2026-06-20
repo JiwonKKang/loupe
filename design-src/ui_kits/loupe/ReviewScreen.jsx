@@ -3,11 +3,131 @@
    in the center. Keyboard-first: Space = Pass + advance, F = Flag, J/K = move.
    Split diff (before | after). Dragging across rows opens an inline AI thread. */
 
+function ProjectMenu({ project, base, target, onChangeProject }) {
+  const { Button } = window.LoupeDesignSystem_045e3b;
+  const [open, setOpen] = React.useState(false);
+  const [hover, setHover] = React.useState(false);
+  const [proj, setProj] = React.useState(project);
+  const [b, setB] = React.useState(base);
+  const [t, setT] = React.useState(target);
+  const ref = React.useRef(null);
+
+  React.useEffect(() => { setProj(project); setB(base); setT(target); }, [project, base, target, open]);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const recents = ['monorepo / api', 'edge-proxy', 'billing-worker'];
+  const Ico = ({ d, w = 14 }) => (
+    <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
+  );
+  const folder = 'M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z';
+  const chev = 'M6 9l6 6 6-6';
+  const fieldStyle = {
+    width: '100%', height: 32, padding: '0 10px', borderRadius: 'var(--radius-sm)',
+    background: 'var(--surface-inset)', border: '1px solid var(--border-default)',
+    color: 'var(--text-primary)', font: 'var(--text-xs)/1 var(--font-mono)', outline: 'none',
+    boxSizing: 'border-box', appearance: 'none', cursor: 'pointer',
+  };
+  const labelStyle = { font: 'var(--weight-medium) 10px/1 var(--font-ui)',
+    letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase',
+    color: 'var(--text-tertiary)', marginBottom: 6, display: 'block' };
+
+  const dirty = proj !== project || b !== base || t !== target;
+
+  return (
+    <div ref={ref} style={{ position: 'absolute', top: 20, left: 24, zIndex: 40,
+      width: 296 }}>
+      {/* one container: the trigger row IS the top of the panel; opening grows
+         the same box downward (max-height), so it reads as a single component */}
+      <div
+        onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+        style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden',
+          border: `1px solid ${open ? 'var(--border-default)' : 'transparent'}`,
+          background: open ? 'var(--surface-overlay)' : (hover ? 'var(--surface-overlay)' : 'transparent'),
+          boxShadow: open ? 'var(--shadow-pop)' : 'none',
+          opacity: open || hover ? 1 : 'var(--dim-rest)',
+          transition: 'background var(--dur-fast) var(--ease-soft), border-color var(--dur-fast) var(--ease-soft), box-shadow var(--dur-base) var(--ease-soft), opacity var(--dur-fast) var(--ease-soft)' }}>
+
+        {/* trigger row */}
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{ display: 'flex', alignItems: 'center', gap: 7, width: '100%', height: 32, padding: '0 10px',
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            color: open ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+          <span style={{ color: 'currentColor', display: 'inline-flex', opacity: 0.7 }}><Ico d={folder} w={13} /></span>
+          <span style={{ font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)', color: 'currentColor', whiteSpace: 'nowrap' }}>{project}</span>
+          <span style={{ width: 1, height: 12, background: 'var(--border-default)' }} />
+          <span style={{ font: 'var(--text-xs)/1 var(--font-mono)', color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>{target}</span>
+          <span style={{ flex: 1 }} />
+          <span style={{ color: 'var(--text-faint)', display: 'inline-flex',
+            transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-soft)' }}><Ico d={chev} w={12} /></span>
+        </button>
+
+        {/* panel that expands straight down inside the same box */}
+        <div style={{ maxHeight: open ? 360 : 0, opacity: open ? 1 : 0,
+          transition: 'max-height var(--dur-slow) var(--ease-out), opacity var(--dur-base) var(--ease-soft)',
+          overflow: 'hidden' }}>
+          <div style={{ padding: '4px 10px 10px', borderTop: '1px solid var(--border-subtle)' }}>
+            <label style={{ ...labelStyle, marginTop: 8 }}>Project</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 6 }}>
+              {recents.map((r) => (
+                <button key={r} onClick={() => setProj(r)} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+                  borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left',
+                  background: proj === r ? 'var(--accent-dim)' : 'transparent',
+                  border: `1px solid ${proj === r ? 'var(--accent-line)' : 'transparent'}`,
+                  font: '12px/1 var(--font-mono)',
+                  color: proj === r ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                  <span style={{ color: proj === r ? 'var(--accent)' : 'var(--text-faint)', display: 'inline-flex' }}><Ico d={folder} w={12} /></span>
+                  {r}
+                </button>
+              ))}
+              <button style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+                borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left', background: 'transparent',
+                border: '1px solid transparent', font: '12px/1 var(--font-ui)', color: 'var(--text-tertiary)' }}>
+                <span style={{ display: 'inline-flex' }}><Ico d="M12 5v14M5 12h14" w={12} /></span>
+                Browse…
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <label style={labelStyle}>Base</label>
+                <select value={b} onChange={(e) => setB(e.target.value)} style={fieldStyle}>
+                  <option>main</option><option>release/24.2</option><option>develop</option>
+                </select>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <label style={labelStyle}>Target</label>
+                <select value={t} onChange={(e) => setT(e.target.value)} style={fieldStyle}>
+                  <option>agent/refactor-auth</option><option>agent/add-redaction</option><option>feature/lease-expiry</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <Button variant="primary" size="sm" fullWidth
+                onClick={() => { onChangeProject({ project: proj, base: b, target: t }); setOpen(false); }}>
+                {dirty ? 'Open review' : 'Re-run review'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReviewScreen(props) {
   const DS = window.LoupeDesignSystem_045e3b;
   const { ProgressSpine, Thread, Button, KeyHint } = DS;
   const {
-    card, index, total, dir, base, target, unresolved,
+    card, index, total, dir, project, base, target, onChangeProject, unresolved,
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
     onPass, onPrev, onNext, onJumpUnresolved,
@@ -195,7 +315,10 @@ function ReviewScreen(props) {
       <div style={{ flex: 1, position: 'relative', display: 'flex',
         flexDirection: 'column', minWidth: 0 }}>
 
-        {/* Minimal top bar — progress · chapter · base→target */}
+        {/* Top-left project / branch menu — switch projects anytime */}
+        <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} />
+
+        {/* Minimal top bar — progress · chapter */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
           gap: 12, padding: '26px 0 0', opacity: 'var(--dim-rest)',
           font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
@@ -205,11 +328,6 @@ function ReviewScreen(props) {
           </span>
           <span style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--text-faint)' }} />
           <span>{card.chapter}</span>
-          <span style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--text-faint)' }} />
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7,
-            font: 'var(--text-xs)/1 var(--font-mono)', color: 'var(--text-tertiary)' }}>
-            {base}<span style={{ color: 'var(--text-faint)' }}><Ico d={arrow} w={13} /></span>{target}
-          </span>
         </div>
 
         {/* Centered card — with a faint deck of remaining cards peeking to the RIGHT */}

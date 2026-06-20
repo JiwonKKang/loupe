@@ -1,17 +1,23 @@
 /* Loupe UI kit — app shell: screen state, verdicts, threads, keyboard nav.
-   Cards + clusters come from the Rust engine in one shot via
-   invoke('analyze_review', …): Onboarding → loading screen → cluster review.
+   Flow: boot → load_token. With a saved token we land on `pickProject` (the
+   review shell with the ProjectMenu auto-opened); without one we run `onboarding`
+   (token only). Choosing a project from the menu fires analyze_review and moves
+   to `review`. Cards + clusters come from the Rust engine in one shot via
+   invoke('analyze_review', …): pickProject → loading screen → cluster review.
    There is no flat intermediate stage — the loading screen holds until the
    analysis lands, then the two-tier cluster view renders directly.
-   Onboarding collects repoPath/base/target/token; everything else
-   (verdicts/threads/spineItems/unresolved) is derived on the front-end. */
+   The token is set once (saved on this Mac) and reused for every project;
+   repoPath/base/target are chosen per-project from the top-left menu. Everything
+   else (verdicts/threads/spineItems/unresolved) is derived on the front-end. */
 
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import Onboarding from './screens/Onboarding';
+import Settings from './screens/Settings';
 import ReviewScreen from './screens/ReviewScreen';
 import SummaryScreen from './screens/SummaryScreen';
+import ProjectMenu from './components/ProjectMenu';
 import { AnalyzeScreen } from './components/AnalyzeScreen';
 import { FileTree } from './components/FileTree';
 import { buildTree } from './data/fixtures';
@@ -49,8 +55,17 @@ function flattenByOrder(cards, orderedCardIds) {
 }
 
 export default function App() {
-  const [screen, setScreen] = React.useState('onboarding'); // onboarding | review | summary
-  const [range, setRange] = React.useState(null);   // { repoPath, base, target, token }
+  const [screen, setScreen] = React.useState('onboarding'); // onboarding | pickProject | review | summary | settings
+  // Where to return from Settings (so the gear can be reached from any screen).
+  const [prevScreen, setPrevScreen] = React.useState('pickProject');
+
+  // The token is set once (onboarding / settings) and persisted on this Mac.
+  const [token, setToken] = React.useState('');
+  // The current project + range, chosen from the top-left ProjectMenu (per-project).
+  const [repoPath, setRepoPath] = React.useState('');
+  const [base, setBase] = React.useState('');
+  const [target, setTarget] = React.useState('');
+
   const [cards, setCards] = React.useState(null);    // null = loading, [] = empty diff
   const [loadError, setLoadError] = React.useState(null);
 
@@ -70,41 +85,57 @@ export default function App() {
   const [threads, setThreads] = React.useState([]);
   const [treeOpen, setTreeOpen] = React.useState(false);
   const tid = React.useRef(1);
-  // Guards a stale analyze_review response from clobbering a newer range's state.
+  // Guards a stale analyze_review response from clobbering a newer project's state.
   const analyzeSeq = React.useRef(0);
 
-  // Load the review whenever a range is chosen (and on retry). Single-phase:
-  // analyze_review returns the cards AND the cluster two-tier (flow order + spine
-  // groups) together. While it runs the loading screen holds; when it lands the
-  // cluster review renders directly — there is NO flat intermediate view.
-  // (A cache hit returns immediately → straight to clusters; a miss can take
-  // minutes, during which the loading screen's staged labels run.)
+  // Boot: read the saved model token. With one we go straight to project-picking
+  // (the review shell with the menu open); without one we run onboarding. A read
+  // failure is non-fatal — fall back to onboarding so the user can (re)connect.
+  React.useEffect(() => {
+    let alive = true;
+    invoke('load_token')
+      .then((t) => {
+        if (!alive) return;
+        if (t) { setToken(t); setScreen('pickProject'); }
+        else { setScreen('onboarding'); }
+      })
+      .catch(() => { if (alive) setScreen('onboarding'); });
+    return () => { alive = false; };
+  }, []);
+
+  // Run the analysis for a project/range. Single-phase: analyze_review returns the
+  // cards AND the cluster two-tier (flow order + spine groups) together. While it
+  // runs the loading screen holds; when it lands the cluster review renders
+  // directly — there is NO flat intermediate view. (A cache hit returns
+  // immediately → straight to clusters; a miss can take minutes, during which the
+  // loading screen's staged labels run.) `r` = { repoPath, base, target }; the
+  // token comes from app state (set once in onboarding/settings).
   const load = React.useCallback((r) => {
-    if (!r) return;
+    if (!r || !r.repoPath || !r.base || !r.target) return;
     setCards(null);
     setLoadError(null);
     setIndex(0);
     setVerdicts({});
     setThreads([]);
-    // Reset the cluster overlay for the new range.
+    // Reset the cluster overlay for the new project.
     setClusters([]); setClusterOrder([]); setOrderedCardIds([]); setUnclustered([]);
     setAnalysisState('clustering');
-    setProgress(INITIAL_PROGRESS); // fresh loader for this range
+    setProgress(INITIAL_PROGRESS); // fresh loader for this project
     const seq = ++analyzeSeq.current;
 
     // analyze_review needs the model token. It returns cards + clusters in one shot.
     // A failure is fatal here (no flat fallback to fall back to) → surface the error.
     invoke('analyze_review', {
-      repoPath: r.repoPath, base: r.base, target: r.target, token: r.token,
+      repoPath: r.repoPath, base: r.base, target: r.target, token,
     })
       .then((data) => {
         if (seq !== analyzeSeq.current) return;
         applyAnalysis(data, seq);
       })
       .catch((err) => { if (seq === analyzeSeq.current) { setLoadError(String(err)); setCards([]); } });
-  // applyAnalysis is stable (defined below via useCallback).
+  // applyAnalysis is stable (defined below via useCallback); token is read fresh.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [token]);
 
   // Adopt an analyze_review payload: the cards and the cluster overlay together.
   const applyAnalysis = React.useCallback((data, seq) => {
@@ -117,8 +148,6 @@ export default function App() {
     setAnalysisState(data.analysis === 'fallback' ? 'fallback' : 'done');
     setLoadError(null);
   }, []);
-
-  React.useEffect(() => { load(range); }, [range, load]);
 
   // Subscribe once to the engine's pipeline progress events and reduce them into `progress`
   // for the AnalyzeScreen loader. Events are cosmetic — a missed one only affects the loader,
@@ -142,10 +171,30 @@ export default function App() {
     return () => { alive = false; if (unlisten) unlisten(); };
   }, []);
 
-  const startReview = (r) => {
-    setRange({ repoPath: r.repoPath, base: r.base || 'main', target: r.target, token: r.token });
+  // Choose a project from the ProjectMenu → store the range + run analysis + show
+  // the review. Same trigger the menu's "Open / Re-run review" hands up.
+  const changeProject = React.useCallback(({ repoPath: rp, base: b, target: t }) => {
+    setRepoPath(rp);
+    setBase(b);
+    setTarget(t);
     setScreen('review');
-  };
+    load({ repoPath: rp, base: b, target: t });
+  }, [load]);
+
+  // Onboarding finished → persist the token, then go pick a project. A save
+  // failure keeps the user on onboarding with the error surfaced.
+  const [onboardError, setOnboardError] = React.useState(null);
+  const finishOnboarding = React.useCallback((t) => {
+    invoke('save_token', { token: t })
+      .then(() => { setOnboardError(null); setToken(t); setScreen('pickProject'); })
+      .catch((err) => setOnboardError(String(err)));
+  }, []);
+
+  // Open Settings, remembering where to return.
+  const openSettings = React.useCallback(() => {
+    setPrevScreen((s) => (s === 'settings' ? 'pickProject' : screen));
+    setScreen('settings');
+  }, [screen]);
 
   // Derived (safe even when cards is null — guarded reads).
   // Flat cards re-ordered into cluster flow order once the analysis arrives (§3.1: every
@@ -282,22 +331,65 @@ export default function App() {
 
   // --- Render. All hooks are declared above; guards live here. ---
 
-  // Onboarding stands on its own (no cards needed).
-  if (screen === 'onboarding') {
+  // Settings stands on its own (reachable from any screen via the gear).
+  if (screen === 'settings') {
     return (
       <React.Fragment>
-        <Onboarding onFinish={startReview} />
-        <ScreenSwitcher screen={screen} setScreen={setScreen} />
+        <Settings connected={token.length > 0}
+          onBack={() => setScreen(prevScreen)}
+          onSaved={(t) => setToken(t)}
+          onCleared={() => setToken('')} />
+        <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
     );
   }
 
-  // Jumped straight to review/summary (e.g. via the dev switcher) without a range.
-  if (!range) {
+  // Onboarding stands on its own (token only — no cards needed).
+  if (screen === 'onboarding') {
     return (
       <React.Fragment>
-        <EmptyDiffScreen range={null} onBack={() => setScreen('onboarding')} />
-        <ScreenSwitcher screen={screen} setScreen={setScreen} />
+        <Onboarding onFinish={finishOnboarding} />
+        {onboardError && <OnboardErrorToast message={onboardError} />}
+        <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
+      </React.Fragment>
+    );
+  }
+
+  // Project-picking shell: the review-screen layout with no card — the ProjectMenu
+  // auto-opens (defaultOpen) at top-left and a center hint invites the user to pick
+  // a project. Choosing one runs analyze_review and moves to `review`.
+  if (screen === 'pickProject') {
+    return (
+      <React.Fragment>
+        <div style={{ position: 'absolute', inset: 0, background: 'var(--bg-base)', overflow: 'hidden' }}>
+          <ProjectMenu
+            project={repoPath} base={base} target={target}
+            branches={undefined} recents={undefined}
+            onChangeProject={changeProject} defaultOpen />
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center', gap: 10, padding: 24, textAlign: 'center',
+            pointerEvents: 'none' }}>
+            <div style={{ font: 'var(--weight-semibold) var(--text-lg)/1.2 var(--font-ui)',
+              color: 'var(--text-secondary)', letterSpacing: 'var(--tracking-snug)' }}>
+              프로젝트를 선택해 리뷰를 시작하세요
+            </div>
+            <div style={{ font: 'var(--text-sm)/1.5 var(--font-ui)', color: 'var(--text-faint)' }}>
+              왼쪽 위 메뉴에서 폴더와 비교할 브랜치를 고르면 분석이 시작됩니다.
+            </div>
+          </div>
+        </div>
+        <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
+      </React.Fragment>
+    );
+  }
+
+  // Review/Summary need a chosen project. If we somehow got here without one
+  // (e.g. via the dev switcher), bounce back to project-picking.
+  if (!repoPath) {
+    return (
+      <React.Fragment>
+        <EmptyDiffScreen range={null} onBack={() => setScreen('pickProject')} />
+        <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
     );
   }
@@ -306,9 +398,9 @@ export default function App() {
   if (loadError) {
     return (
       <React.Fragment>
-        <LoadErrorScreen message={loadError} onRetry={() => load(range)}
-          onBack={() => setScreen('onboarding')} />
-        <ScreenSwitcher screen={screen} setScreen={setScreen} />
+        <LoadErrorScreen message={loadError} onRetry={() => load({ repoPath, base, target })}
+          onBack={() => setScreen('pickProject')} />
+        <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
     );
   }
@@ -316,15 +408,15 @@ export default function App() {
     return (
       <React.Fragment>
         <AnalyzeScreen progress={progress} />
-        <ScreenSwitcher screen={screen} setScreen={setScreen} />
+        <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
     );
   }
   if (cards.length === 0) {
     return (
       <React.Fragment>
-        <EmptyDiffScreen range={range} onBack={() => setScreen('onboarding')} />
-        <ScreenSwitcher screen={screen} setScreen={setScreen} />
+        <EmptyDiffScreen range={{ base, target }} onBack={() => setScreen('pickProject')} />
+        <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
     );
   }
@@ -339,7 +431,8 @@ export default function App() {
       {screen === 'review' && card && (
         <ReviewScreen
           card={card} index={index} total={list.length} dir={dir}
-          base={range ? range.base : 'base'} target={range ? range.target : 'target'} unresolved={unresolved}
+          project={repoPath} base={base} target={target} onChangeProject={changeProject}
+          unresolved={unresolved}
           cluster={clusterOf(card)} clusterIndex={clusterPosition(card)}
           analysisState={analysisState}
           onOpenSummary={() => setScreen('summary')}
@@ -356,7 +449,7 @@ export default function App() {
           onRestart={() => { setIndex(0); setDir(1); setScreen('review'); }} />
       )}
 
-      <ScreenSwitcher screen={screen} setScreen={setScreen} />
+      <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
     </React.Fragment>
   );
 }
@@ -381,7 +474,7 @@ function EmptyDiffScreen({ range, onBack }) {
       <div style={{ font: 'var(--text-base)/1.5 var(--font-ui)', color: 'var(--text-secondary)', maxWidth: 420 }}>
         {range ? `${range.base} and ${range.target} have no differences.` : 'No differences found.'}
       </div>
-      <button onClick={onBack} style={pillButtonStyle}>Pick another range</button>
+      <button onClick={onBack} style={pillButtonStyle}>Pick another project</button>
     </CenterPane>
   );
 }
@@ -408,15 +501,29 @@ function LoadErrorScreen({ message, onRetry, onBack }) {
   );
 }
 
+// A small inline toast for an onboarding save_token failure (the only place the
+// token persists from onboarding).
+function OnboardErrorToast({ message }) {
+  return (
+    <div style={{ position: 'fixed', bottom: 18, left: '50%', transform: 'translateX(-50%)',
+      zIndex: 70, maxWidth: 520, padding: '10px 14px', borderRadius: 'var(--radius-md)',
+      background: 'var(--surface-inset)', border: '1px solid var(--flag)',
+      color: 'var(--flag)', font: 'var(--text-sm)/1.4 var(--font-ui)' }}>
+      {message}
+    </div>
+  );
+}
+
 const pillButtonStyle = {
   height: 34, padding: '0 16px', borderRadius: 'var(--radius-pill)', cursor: 'pointer',
   background: 'var(--accent-dim)', border: '1px solid var(--accent-line)', color: 'var(--accent)',
   font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
 };
 
-function ScreenSwitcher({ screen, setScreen }) {
+function ScreenSwitcher({ screen, setScreen, onSettings }) {
   const [hover, setHover] = React.useState(false);
-  const tabs = [['onboarding', 'Onboarding'], ['review', 'Review'], ['summary', 'Summary']];
+  const tabs = [['onboarding', 'Onboarding'], ['pickProject', 'Pick'], ['review', 'Review'], ['summary', 'Summary']];
+  const gear = 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z';
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       title="Demo: jump between screens"
@@ -439,6 +546,21 @@ function ScreenSwitcher({ screen, setScreen }) {
             background: screen === k ? 'var(--text-secondary)' : 'var(--text-faint)' }} />
         )
       ))}
+      {/* Settings gear — always reachable; sits at the end of the switcher. */}
+      {hover && onSettings && (
+        <React.Fragment>
+          <span style={{ width: 1, height: 12, background: 'var(--border-default)', margin: '0 2px' }} />
+          <button onClick={onSettings} aria-label="Settings" title="Settings" style={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            padding: '4px', borderRadius: 'var(--radius-pill)', cursor: 'pointer', border: 'none',
+            background: screen === 'settings' ? 'var(--surface-overlay)' : 'transparent',
+            color: screen === 'settings' ? 'var(--text-primary)' : 'var(--text-tertiary)',
+            transition: 'var(--t-hover)' }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={gear} /></svg>
+          </button>
+        </React.Fragment>
+      )}
     </div>
   );
 }
