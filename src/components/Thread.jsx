@@ -77,7 +77,7 @@ export function Thread({
       padding: '14px 16px 13px', ...style,
     }}>
       {/* quiet top-right actions: collapse + resolve */}
-      <div style={{ position: 'absolute', top: 7, right: 11, display: 'flex', gap: 2 }}>
+      <div style={{ position: 'absolute', top: 10, right: 11, display: 'flex', gap: 2 }}>
         <button onClick={closeWith(onToggle)} title="Collapse" style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           width: 28, height: 28, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
