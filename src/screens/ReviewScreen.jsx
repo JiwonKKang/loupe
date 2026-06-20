@@ -392,14 +392,24 @@ export default function ReviewScreen(props) {
     const el = threadEls.current[justOpened];
     const cont = diffRef.current;
     if (!el || !cont) return;
-    const HEADER = 40; // sticky column-header height (~36–40px)
-    const cTop = cont.getBoundingClientRect().top;
-    const eTop = el.getBoundingClientRect().top;
-    // Distance of the thread's top below the header's bottom edge. Negative
-    // means the thread top is hidden behind the sticky header → scroll up so it
-    // drops below the header (with a small 8px breathing margin).
-    const delta = eTop - (cTop + HEADER);
-    if (delta < 0) cont.scrollTop += delta - 8;
+    // Bring the whole opened thread into view between the sticky column header
+    // (top) and the sticky h-scrollbar (bottom). Handles BOTH cases: top hidden
+    // under the header → scroll up; bottom spilling past the viewport → scroll
+    // down. (The earlier version only handled the top, so a thread opening low
+    // in the viewport stayed clipped below its action buttons.)
+    const HEADER = 44; // sticky column-header height
+    const FOOTER = 44; // sticky bottom h-scrollbar height
+    const cR = cont.getBoundingClientRect();
+    const eR = el.getBoundingClientRect();
+    const viewTop = cR.top + HEADER;
+    const viewBot = cR.bottom - FOOTER;
+    if (eR.height >= viewBot - viewTop) {
+      cont.scrollTop += eR.top - viewTop;            // taller than viewport → align its top
+    } else if (eR.top < viewTop) {
+      cont.scrollTop += eR.top - viewTop - 8;        // top hidden under header → reveal top
+    } else if (eR.bottom > viewBot) {
+      cont.scrollTop += eR.bottom - viewBot + 8;     // bottom spills below → scroll down to reveal
+    }
     // threads: re-run when any thread opens/closes. card.id: a card switch
     // remounts the diff container, so re-evaluate against the fresh node.
     // eslint-disable-next-line react-hooks/exhaustive-deps

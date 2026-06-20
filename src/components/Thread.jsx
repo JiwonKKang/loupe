@@ -17,6 +17,12 @@ export function Thread({
   style = {},
 }) {
   const [draft, setDraft] = React.useState('');
+  // Collapse/resolve play a brief "fold up" exit before the parent unmounts the
+  // open thread (it swaps in the small badge). We stay mounted for the animation,
+  // then fire the real action. Transform/opacity only — no height animation (that
+  // reflowed the virtualizer every frame).
+  const [closing, setClosing] = React.useState(false);
+  const closeWith = (fn) => () => { setClosing(true); setTimeout(() => fn && fn(), 175); };
 
   if (collapsed) {
     const hasCommand = messages.some((m) => m.kind === 'command');
@@ -62,20 +68,22 @@ export function Thread({
       position: 'relative',
       background: 'var(--surface-overlay)', border: '1px solid var(--border-subtle)',
       borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-sm)',
-      overflow: 'hidden', transformOrigin: 'top left',
-      animation: 'loupe-thread-in var(--dur-slow) var(--ease-out)',
+      overflow: 'hidden', transformOrigin: 'top center',
+      animation: closing
+        ? 'loupe-thread-out 0.17s var(--ease-out) forwards'
+        : 'loupe-thread-in var(--dur-slow) var(--ease-out)',
       padding: '12px 14px', ...style,
     }}>
       {/* quiet top-right actions: collapse + resolve */}
       <div style={{ position: 'absolute', top: 9, right: 10, display: 'flex', gap: 2 }}>
-        <button onClick={onToggle} title="Collapse" style={{
+        <button onClick={closeWith(onToggle)} title="Collapse" style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           width: 24, height: 24, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
           background: 'transparent', border: 'none', color: 'var(--text-tertiary)' }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 15l-6-6-6 6" /></svg>
         </button>
-        <button onClick={onResolve} title={resolved ? 'Resolved' : 'Resolve'} style={{
+        <button onClick={closeWith(onResolve)} title={resolved ? 'Resolved' : 'Resolve'} style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           width: 24, height: 24, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
           background: 'transparent', border: 'none',

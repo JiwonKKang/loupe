@@ -24,6 +24,12 @@ body { font-family: var(--font-ui); color: var(--text-primary);
   60%  { opacity: 1; }
   to   { opacity: 1; transform: translateY(0); }
 }
+/* Collapse: fold up + fade (transform/opacity only — no height reflow). The
+   thread plays this for ~170ms, then the parent swaps in the small badge. */
+@keyframes loupe-thread-out {
+  from { opacity: 1; transform: translateY(0) scaleY(1); }
+  to   { opacity: 0; transform: translateY(-10px) scaleY(0.92); }
+}
 @keyframes loupe-thread-badge-in {
   from { opacity: 0; transform: scale(0.85); }
   to   { opacity: 1; transform: scale(1); }
