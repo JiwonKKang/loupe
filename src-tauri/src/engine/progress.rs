@@ -19,6 +19,11 @@ use serde::Serialize;
 pub enum Progress {
     /// Deterministic prep finished — the diff was parsed into `files` changed files.
     Static { files: usize },
+    /// Static analysis (parse + relations + cluster cards) is DONE; the first AI call (④⑤
+    /// clustering+ordering) is now running. Lets the loader mark "Static analysis" complete
+    /// instead of leaving it spinning while the AI works — the long wait belongs to THIS phase,
+    /// not to static prep.
+    Clustering,
     /// Cluster membership decided (after ④): the clusters the model will review, each with
     /// its member symbol names. Titles are not known yet — they arrive per [`Progress::Reviewed`].
     Clusters { clusters: Vec<ProgressCluster> },

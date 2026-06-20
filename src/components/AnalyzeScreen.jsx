@@ -44,9 +44,11 @@ export function AnalyzeScreen({ progress }) {
   const doneCount = clusters.filter(isDone).length;
 
   const phaseLabel = phase === 'static' ? 'Running static analysis'
-    : phase === 'review' ? 'Reviewing in parallel'
-    : 'Final clustering pass';
+    : phase === 'clustering' ? 'Clustering changes'
+    : phase === 'review' ? 'Reviewing clusters'
+    : 'Final ordering pass';
   const phaseSub = phase === 'static' ? `Scanning the diff · ${files} file${files === 1 ? '' : 's'}`
+    : phase === 'clustering' ? 'Grouping & ordering by data flow · running on your model'
     : phase === 'review' ? `${doneCount}/${clusters.length} clusters · running on your model`
     : 'Merging and ordering by data flow';
 
@@ -123,8 +125,8 @@ export function AnalyzeScreen({ progress }) {
 
           {/* pipeline footer */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 26 }}>
-            {[['static', 'Static analysis'], ['review', 'Parallel review'], ['final', 'Final clustering']].map(([k, label], i) => {
-              const order = { static: 0, review: 1, final: 2 };
+            {[['static', 'Static'], ['clustering', 'Clustering'], ['review', 'Review'], ['final', 'Final']].map(([k, label], i) => {
+              const order = { static: 0, clustering: 1, review: 2, final: 3 };
               const active = order[phase] === i;
               const passed = order[phase] > i;
               return (

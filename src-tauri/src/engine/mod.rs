@@ -695,6 +695,11 @@ pub async fn run_cluster_pipeline(
 
     let whitelist = steps::whitelist_of(cards);
 
+    // Deterministic static work (parse + relations + cluster cards) is done by the time we get
+    // here; everything below is AI. Tell the loader so it can complete "Static analysis" and
+    // show "Clustering" as the active phase, instead of hiding the ④⑤ wait under "static".
+    progress.emit(Progress::Clustering);
+
     // ④+⑤: the **combined** call is the default (small *and* medium PRs) so a cache-miss
     // analysis is ④⑤(1) + ⑥(1) = 2 AI calls. We split into `cluster_step` + `order_step` (3
     // calls total) ONLY when:

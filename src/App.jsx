@@ -166,6 +166,7 @@ export default function App() {
       setProgress((prev) => {
         switch (p.kind) {
           case 'static': return { ...prev, phase: 'static', files: p.files != null ? p.files : prev.files };
+          case 'clustering': return { ...prev, phase: 'clustering' };
           case 'clusters': return { ...prev, phase: 'review', clusters: p.clusters || [] };
           case 'reviewed': return { ...prev, reviewed: { ...prev.reviewed, [p.id]: p.chapter || '' } };
           case 'final': return { ...prev, phase: 'final' };
