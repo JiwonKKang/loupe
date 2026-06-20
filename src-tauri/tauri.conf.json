@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "loupe",
+  "productName": "Loupe",
   "version": "0.1.0",
   "identifier": "com.jiwon.loupe",
   "build": {
@@ -27,13 +27,21 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["dmg", "app"],
+    "category": "DeveloperTool",
+    "copyright": "© 2026 강지원",
+    "shortDescription": "Human-first code review",
+    "longDescription": "Loupe reorders a PR diff into data-flow order and walks you through it one symbol-card at a time, with AI clustering, labels, and inline codebase-aware Q&A.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

@@ -1,0 +1,61 @@
+name: release
+
+# Build the macOS app and publish a GitHub Release with the .dmg whenever a
+# version tag (v*) is pushed (or run manually). Ad-hoc signed — no Apple
+# Developer account — so the Homebrew Cask strips the quarantine flag on
+# install and the app launches without the "damaged / unidentified developer"
+# block. Universal binary (Apple Silicon + Intel) from one artifact.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    runs-on: macos-14 # Apple Silicon runner
+    permissions:
+      contents: write # tauri-action creates the Release + uploads the .dmg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build + publish release (universal .dmg, ad-hoc signed)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Loupe ${{ github.ref_name }}"
+          releaseBody: |
+            Unsigned (ad-hoc) macOS build — install with Homebrew:
+
+                brew install --cask JiwonKKang/loupe/loupe
+
+            Or open the `.dmg` directly. On first launch macOS may warn it is
+            from an unidentified developer — right-click the app → **Open**, or:
+
+                xattr -dr com.apple.quarantine /Applications/Loupe.app
+          releaseDraft: false
+          prerelease: false
+          args: --target universal-apple-darwin
