@@ -90,6 +90,14 @@ export default function ReviewScreen(props) {
     threads, onOpenLine, onResolve, onSend,
   } = props;
 
+  // Per-thread element refs for the open-thread wrappers, so a newly-opened
+  // thread can be scrolled clear of the sticky column header (see the layout
+  // effect below). Keyed by thread id.
+  const threadEls = React.useRef({});
+  // The set of thread ids that were open on the previous render — diffed against
+  // the current open set to detect which thread was JUST opened this commit.
+  const prevOpenIds = React.useRef(new Set());
+
   // ---- Build aligned split rows (before | after) from the unified line list.
   const rows = React.useMemo(() => {
     const start = (card.lines[0] && card.lines[0].n) || 1;
@@ -350,6 +358,35 @@ export default function ReviewScreen(props) {
     return cb;
   }, []);
 
+  // When a thread is opened, its wrapper (which holds the resolve/collapse
+  // buttons at its top) can sit underneath the opaque sticky column header
+  // (top:0, zIndex:2) and be hidden. Detect the thread that was JUST opened
+  // this commit and scroll the diff container so that thread's top clears the
+  // sticky header. Runs before paint (useLayoutEffect) so the user never sees
+  // the clipped state. Top-level hook (no early return in this component).
+  React.useLayoutEffect(() => {
+    const openIds = new Set(threads.filter((t) => t.open).map((t) => t.id));
+    // Find an id that is open now but was NOT open on the previous render.
+    let justOpened = null;
+    openIds.forEach((id) => { if (!prevOpenIds.current.has(id)) justOpened = id; });
+    prevOpenIds.current = openIds;
+    if (!justOpened) return;
+    const el = threadEls.current[justOpened];
+    const cont = diffRef.current;
+    if (!el || !cont) return;
+    const HEADER = 40; // sticky column-header height (~36–40px)
+    const cTop = cont.getBoundingClientRect().top;
+    const eTop = el.getBoundingClientRect().top;
+    // Distance of the thread's top below the header's bottom edge. Negative
+    // means the thread top is hidden behind the sticky header → scroll up so it
+    // drops below the header (with a small 8px breathing margin).
+    const delta = eTop - (cTop + HEADER);
+    if (delta < 0) cont.scrollTop += delta - 8;
+    // threads: re-run when any thread opens/closes. card.id: a card switch
+    // remounts the diff container, so re-evaluate against the fresh node.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threads, card.id]);
+
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
       strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
@@ -603,7 +640,8 @@ export default function ReviewScreen(props) {
                         active={active} isFirst={isFirst} isLast={isLast} thread={thread} />
                     </div>
                     {thread && thread.open && (
-                      <div style={{ padding: '8px 28px 12px 52px' }}>
+                      <div ref={(el) => { if (el) threadEls.current[thread.id] = el; }}
+                        style={{ padding: '8px 28px 12px 52px' }}>
                         <Thread messages={thread.messages} resolved={thread.resolved}
                           pending={thread.pending}
                           collapsed={false} onToggle={() => onOpenLine(thread.side || 'old', r)}

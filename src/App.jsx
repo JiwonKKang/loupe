@@ -348,7 +348,7 @@ export default function App() {
     // Mark the thread as thinking (spinner row in Thread.jsx).
     setThreads((p) => p.map((x) => x.id === id ? { ...x, pending: true } : x));
 
-    invoke('ask_thread', { token, context, question: text, history })
+    invoke('ask_thread', { token, repoPath, context, question: text, history })
       .then((answer) => {
         setThreads((p) => p.map((x) => x.id === id
           ? { ...x, pending: false, messages: [...x.messages, { author: 'ai', text: String(answer), time: 'now' }] }

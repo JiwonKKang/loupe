@@ -51,9 +51,32 @@ use super::{CompletionRequest, CompletionResponse, LlmError, LlmProvider, ModelT
 use async_trait::async_trait;
 use serde_json::Value;
 use std::process::Command;
+use std::time::Duration;
 
 /// Default CLI binary name (resolved on `PATH`).
 const DEFAULT_CLAUDE_BIN: &str = "claude";
+
+/// CLI model alias the codebase-aware agent runs on. The spec pins Sonnet by full id; the
+/// CLI accepts both bare aliases and full names, so this is sent verbatim to `--model`.
+const AGENTIC_MODEL: &str = "claude-sonnet-4-6";
+
+/// Read-only tool allowlist for the agent. Only file *reading* / *searching* tools are
+/// granted — `Read` (open a file), `Grep` (content search), `Glob` (path search), `LS`
+/// (directory listing). **No write/exec tool is ever on this list** (Write/Edit/Bash/etc.),
+/// so the agent can inspect the repo but cannot modify or run anything in it.
+const AGENTIC_ALLOWED_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS"];
+
+/// Defense-in-depth deny-list: even if a future default ever flipped a mutating/exec tool
+/// on, these are explicitly forbidden. The allowlist above is the primary gate; this is a
+/// belt-and-braces second barrier against modifying or executing anything in the user repo.
+const AGENTIC_DISALLOWED_TOOLS: &[&str] =
+    &["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"];
+
+/// Hard wall-clock cap for one agentic call. Agents read files / run searches in a loop, so
+/// they are far slower than a single completion; without a cap a stuck turn (e.g. waiting on
+/// something) would hang the Tauri command forever. On expiry we return a human-readable Err
+/// instead of blocking the UI.
+const AGENTIC_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The env var the `claude` CLI reads for the setup-token (OAuth). Set on the child
 /// process only — never logged, never placed on the command line.
@@ -222,6 +245,143 @@ fn parse_wrapper(wrapper: &Value) -> Result<CompletionResponse, LlmError> {
         .unwrap_or_else(|_| Value::String(result_text.to_string()));
 
     Ok(CompletionResponse { json, stop_reason })
+}
+
+/// Assemble the `claude` argv for a **codebase-aware (agentic), read-only** run. Pure (no
+/// I/O) so it is unit-testable — the spawn/cwd/env wiring lives in `ask_agentic`.
+///
+/// The agent is allowed to *read* the repo (Read/Grep/Glob/LS) and nothing else: the
+/// allowlist grants only those four, and a deny-list explicitly blocks Write/Edit/Bash/etc.
+/// `--permission-mode default` means anything not on the allowlist is *denied* (in `-p`
+/// non-interactive mode there is no prompt to hang on — the model is just told it can't use
+/// that tool), so the agent can never modify or execute anything in the user's repo.
+fn build_agentic_args(prompt: &str) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-p".into(),
+        prompt.to_string(),
+        "--model".into(),
+        AGENTIC_MODEL.into(),
+        "--output-format".into(),
+        "json".into(),
+        // Non-interactive: deny anything not explicitly allowed (no auto-accept of writes/
+        // exec), and in -p mode there is no permission prompt to block on.
+        "--permission-mode".into(),
+        "default".into(),
+        // Don't write session files to disk.
+        "--no-session-persistence".into(),
+    ];
+    // Read-only allowlist: each tool as its own argv element (space-separated form).
+    args.push("--allowedTools".into());
+    for tool in AGENTIC_ALLOWED_TOOLS {
+        args.push((*tool).to_string());
+    }
+    // Explicit deny-list (defense in depth) — never grant mutating/exec tools.
+    args.push("--disallowedTools".into());
+    for tool in AGENTIC_DISALLOWED_TOOLS {
+        args.push((*tool).to_string());
+    }
+    args
+}
+
+/// Extract the agent's **natural-language** answer (the wrapper's `result` text) from the
+/// `--output-format json` wrapper. Unlike `parse_wrapper` (which parses `result` as JSON for
+/// the clustering pipeline), the agent replies in free prose, so we return `result` verbatim.
+///  - `is_error: true` ⇒ `Err` (auth failures surfaced distinctly, like `parse_wrapper`).
+///  - empty/missing `result` ⇒ `Err`.
+fn extract_agentic_result(wrapper: &Value) -> Result<String, String> {
+    let is_error = wrapper
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let result_text = wrapper.get("result").and_then(Value::as_str).unwrap_or("");
+
+    if is_error {
+        if result_text.contains("Not logged in") || result_text.contains("login") {
+            return Err("authentication failed (check the model token)".to_string());
+        }
+        return Err(format!("claude agent error: {result_text}"));
+    }
+
+    let trimmed = result_text.trim();
+    if trimmed.is_empty() {
+        return Err("claude agent returned an empty answer".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Run a **codebase-aware (agentic), read-only** query through the `claude` CLI and return the
+/// agent's natural-language answer.
+///
+/// Unlike `CliProvider::complete` (a single prompt-only completion with **all** tools disabled
+/// and a clean temp cwd), this runs the CLI as an agent that may *read* the repo: it is given
+/// the repo as its working directory and the read-only tool set (Read/Grep/Glob/LS) so it can
+/// open real files, grep for definitions/callers, and answer grounded in the actual codebase.
+///
+/// Safety (read-only is the top priority):
+///  - **allowlist = Read/Grep/Glob/LS only**; **deny-list blocks Write/Edit/Bash/etc.** — the
+///    agent cannot modify or execute anything in the user's repo.
+///  - `current_dir(repo_path)` confines tool access to that repo (no access outside it).
+///  - the setup-token goes to the child via the `CLAUDE_CODE_OAUTH_TOKEN` env only — **never on
+///    argv, never logged**.
+///  - a 180 s `tokio::time::timeout` caps a stuck run so the Tauri command can never hang.
+///
+/// `bin` overrides the binary (a stub script in tests); `None` uses the default on `PATH`.
+pub async fn ask_agentic(
+    token: String,
+    repo_path: String,
+    prompt: String,
+    bin: Option<String>,
+) -> Result<String, String> {
+    let bin = bin.unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string());
+    let args = build_agentic_args(&prompt);
+
+    // The CLI is blocking; run it on the blocking pool. The closure owns everything it needs.
+    let spawn = tokio::task::spawn_blocking(move || {
+        Command::new(&bin)
+            .args(&args)
+            // Give the agent the repo as context AND confine its read tools to that tree.
+            .current_dir(&repo_path)
+            // Setup-token via env only — never on argv, never logged.
+            .env(TOKEN_ENV, token)
+            .output()
+    });
+
+    // Hard wall-clock cap: agents loop over reads/searches and can be slow; never hang the UI.
+    let output = match tokio::time::timeout(AGENTIC_TIMEOUT, spawn).await {
+        Ok(joined) => joined.map_err(|e| format!("claude agent task join failed: {e}"))?,
+        Err(_) => {
+            return Err(format!(
+                "the agent took too long to answer (over {}s) — try a narrower question",
+                AGENTIC_TIMEOUT.as_secs()
+            ));
+        }
+    };
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err("claude CLI not found".to_string());
+        }
+        Err(e) => return Err(format!("claude agent spawn failed: {e}")),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let wrapper: Value = match serde_json::from_str(stdout.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!(
+                    "claude agent exited {:?}: {}",
+                    output.status.code(),
+                    stderr.trim()
+                ));
+            }
+            return Err(format!("claude agent stdout not JSON: {e}"));
+        }
+    };
+
+    extract_agentic_result(&wrapper)
 }
 
 #[async_trait]
@@ -511,6 +671,152 @@ mod tests {
         assert_eq!(resp.json["clusters"][0]["clusterId"], "s1");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- ask_agentic (codebase-aware, read-only) ----
+
+    #[test]
+    fn agentic_args_request_json_output_and_pin_sonnet() {
+        let a = build_agentic_args("explain foo");
+        // -p <prompt>
+        let p_idx = a.iter().position(|x| x == "-p").unwrap();
+        assert_eq!(a[p_idx + 1], "explain foo");
+        // --model claude-sonnet-4-6
+        let m_idx = a.iter().position(|x| x == "--model").unwrap();
+        assert_eq!(a[m_idx + 1], "claude-sonnet-4-6");
+        // --output-format json
+        assert!(a.windows(2).any(|w| w[0] == "--output-format" && w[1] == "json"));
+        // non-interactive print + no session files on disk
+        assert!(a.iter().any(|x| x == "--no-session-persistence"));
+    }
+
+    #[test]
+    fn agentic_args_allow_only_read_only_tools() {
+        let a = build_agentic_args("q");
+        let allow_idx = a
+            .iter()
+            .position(|x| x == "--allowedTools")
+            .expect("--allowedTools present");
+        // The four read-only tools follow the flag, in order.
+        assert_eq!(&a[allow_idx + 1..allow_idx + 5], &["Read", "Grep", "Glob", "LS"]);
+    }
+
+    #[test]
+    fn agentic_args_never_allow_write_or_exec_tools() {
+        let a = build_agentic_args("q");
+        // Bound the allow-list region: between --allowedTools and the next flag.
+        let allow_idx = a.iter().position(|x| x == "--allowedTools").unwrap();
+        let allow_end = a[allow_idx + 1..]
+            .iter()
+            .position(|x| x.starts_with("--"))
+            .map(|p| allow_idx + 1 + p)
+            .unwrap_or(a.len());
+        let allowed = &a[allow_idx + 1..allow_end];
+        for forbidden in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            assert!(
+                !allowed.iter().any(|t| t == forbidden),
+                "{forbidden} must never be allowed (read-only)"
+            );
+        }
+        // And they appear on the explicit deny-list.
+        let deny_idx = a
+            .iter()
+            .position(|x| x == "--disallowedTools")
+            .expect("--disallowedTools present");
+        let denied = &a[deny_idx + 1..];
+        for forbidden in ["Bash", "Write", "Edit"] {
+            assert!(
+                denied.iter().any(|t| t == forbidden),
+                "{forbidden} must be on the deny-list"
+            );
+        }
+    }
+
+    #[test]
+    fn agentic_args_use_non_auto_permission_mode() {
+        let a = build_agentic_args("q");
+        let idx = a.iter().position(|x| x == "--permission-mode").unwrap();
+        let mode = &a[idx + 1];
+        // Must NOT be a mode that auto-grants writes/exec.
+        assert_ne!(mode, "bypassPermissions");
+        assert_ne!(mode, "acceptEdits");
+        assert_eq!(mode, "default");
+    }
+
+    #[test]
+    fn extract_agentic_returns_result_text() {
+        let wrapper = json!({
+            "is_error": false,
+            "result": "The function foo() is defined in src/foo.rs and called from bar()."
+        });
+        let out = extract_agentic_result(&wrapper).unwrap();
+        assert!(out.contains("foo()"));
+    }
+
+    #[test]
+    fn extract_agentic_is_error_becomes_err() {
+        let wrapper = json!({ "is_error": true, "result": "model overloaded" });
+        let err = extract_agentic_result(&wrapper).unwrap_err();
+        assert!(err.contains("agent error"), "got {err}");
+    }
+
+    #[test]
+    fn extract_agentic_not_logged_in_is_auth_err() {
+        let wrapper = json!({ "is_error": true, "result": "Not logged in · run /login" });
+        let err = extract_agentic_result(&wrapper).unwrap_err();
+        assert!(err.contains("authentication"), "got {err}");
+    }
+
+    #[test]
+    fn extract_agentic_empty_result_is_err() {
+        let wrapper = json!({ "is_error": false, "result": "" });
+        assert!(extract_agentic_result(&wrapper).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ask_agentic_spawns_stub_bin_and_returns_result_text() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("loupe_agent_stub_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude_agent_stub.sh");
+        let mut f = std::fs::File::create(&bin).unwrap();
+        // Emit a wrapper with a free-text result; ignore all args/stdin.
+        writeln!(
+            f,
+            "#!/bin/sh\ncat <<'EOF'\n{{\"is_error\":false,\"result\":\"foo() lives in src/foo.rs\"}}\nEOF"
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+
+        let answer = ask_agentic(
+            "tok".into(),
+            dir.to_string_lossy().into_owned(),
+            "where is foo()?".into(),
+            Some(bin.to_string_lossy().into_owned()),
+        )
+        .await
+        .expect("stub agent answers");
+        assert!(answer.contains("src/foo.rs"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ask_agentic_missing_binary_is_not_found() {
+        let err = ask_agentic(
+            "tok".into(),
+            std::env::temp_dir().to_string_lossy().into_owned(),
+            "q".into(),
+            Some("/nonexistent/claude_binary_xyz".into()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("not found"), "got {err}");
     }
 
     #[tokio::test]

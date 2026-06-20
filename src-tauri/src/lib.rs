@@ -137,81 +137,63 @@ struct ThreadTurn {
     text: String,
 }
 
-/// Ask a free-text follow-up question about a selected region of a diff.
+/// Ask a **codebase-aware** follow-up question about a selected region of a diff.
 ///
-/// The front-end calls `invoke('ask_thread', { token, context, question, history })`. `context`
-/// is the front-end-assembled string (card symbol/path + a windowed diff excerpt + a "user is
-/// asking about line N (side)" marker); `question` is the user's current message; `history` is
-/// the prior turns of this thread (this question excluded). The reply is a plain string (the
-/// model's natural-language answer).
+/// The front-end calls `invoke('ask_thread', { token, repoPath, context, question, history })`
+/// (Tauri maps the camelCase `repoPath` to `repo_path`, same as `load_review` / `analyze_review`).
+/// `context` is the front-end-assembled string (card symbol/path + a windowed diff excerpt + a
+/// "user is asking about line N (side)" marker); `question` is the user's current message;
+/// `history` is the prior turns of this thread (this question excluded). The reply is a plain
+/// string (the agent's natural-language answer).
+///
+/// Unlike the old prompt-only path (which saw *only* the diff), this runs the `claude` CLI as a
+/// **read-only agent** in the repo: it can open real files, grep for definitions/callers, and
+/// answer grounded in the actual codebase — not just the diff excerpt. See `cli::ask_agentic`
+/// for the safety model (read-only allowlist Read/Grep/Glob/LS, write/exec tools denied, cwd
+/// confined to `repo_path`, 180 s timeout).
 ///
 /// Auth mirrors `analyze_review` / `verify_token`: `validate_token` runs first (whitespace /
-/// non-ASCII / empty rejected, token never logged), then a `CliProvider` (Sonnet via the
-/// `claude` CLI) is built with the moved-in token. We use the `Quality` tier because answer
-/// quality matters more than latency here, and `json_schema: None` so the model returns free
-/// text. `temperature: 0.3` keeps answers grounded but not robotic.
-///
-/// Extraction: with no schema, `CliProvider` puts the model's text in `CompletionResponse.json`
-/// as a `Value::String` (the free-text fallback in `cli::parse_wrapper`). We return that string
-/// directly; on the off chance the model emitted JSON, we hand back its compact serialisation so
-/// the caller still gets the text rather than an error.
+/// non-ASCII / empty rejected, token **never logged**), then the token is moved into
+/// `ask_agentic` which passes it to the child via env only (never on argv).
 #[tauri::command]
 async fn ask_thread(
     token: String,
+    repo_path: String,
     context: String,
     question: String,
     history: Vec<ThreadTurn>,
 ) -> Result<String, String> {
-    use engine::ai::{CompletionRequest, LlmProvider, ModelTier};
-
     let token = validate_token(&token)?;
-    let provider = engine::ai::cli::CliProvider::new(token);
 
-    let system = "You are a senior engineer reviewing a code change together with a user. \
-         The user has selected one region of a diff and is asking about it. Answer concisely and \
-         concretely, grounded in the provided diff. Reply in the user's language (if the question \
-         is in Korean, answer in Korean). If you do not know, say so."
-        .to_string();
-
-    // user message = front-end context, then the prior transcript (author → User/Assistant),
-    // then the current question last.
-    let mut user = context;
-    user.push_str("\n\n--- Conversation so far ---\n");
+    // Prompt: tell the agent it is reviewing a real repo, give it the diff context + the user's
+    // selected question, and invite it to read the relevant code (definitions / callers / related
+    // files) so the answer is grounded in the actual codebase. Prior turns follow as a transcript.
+    let mut prompt = String::from(
+        "You are a senior engineer reviewing a code change in THIS repository together with a \
+         user. Below is the change context (file / symbol / diff) and the user's question about a \
+         region they selected. When it helps, read the relevant code in this repo directly \
+         (definitions, callers, related files) and answer concisely and concretely, grounded in \
+         the ACTUAL codebase — not just the diff excerpt. Reply in the user's language (if the \
+         question is in Korean, answer in Korean). If you do not know, say so.\n\n",
+    );
+    prompt.push_str("--- Change context ---\n");
+    prompt.push_str(&context);
+    prompt.push_str("\n\n--- Conversation so far ---\n");
     for turn in &history {
         let role = if turn.author == "ai" {
             "Assistant"
         } else {
             "User"
         };
-        user.push_str(role);
-        user.push_str(": ");
-        user.push_str(&turn.text);
-        user.push('\n');
+        prompt.push_str(role);
+        prompt.push_str(": ");
+        prompt.push_str(&turn.text);
+        prompt.push('\n');
     }
-    user.push_str("\nUser: ");
-    user.push_str(&question);
+    prompt.push_str("\nUser: ");
+    prompt.push_str(&question);
 
-    let req = CompletionRequest {
-        system,
-        user,
-        max_tokens: 1024,
-        json_schema: None,
-        tier: ModelTier::Quality,
-        temperature: 0.3,
-    };
-
-    let resp = provider
-        .complete(req)
-        .await
-        .map_err(|e| format!("could not reach the model: {e}"))?;
-
-    // Free-text path: parse_wrapper stores plain text as Value::String. Return it directly;
-    // if the model returned structured JSON instead, hand back its compact serialisation.
-    let text = match resp.json {
-        serde_json::Value::String(s) => s,
-        other => other.to_string(),
-    };
-    Ok(text)
+    engine::ai::cli::ask_agentic(token, repo_path, prompt, None).await
 }
 
 /// Re-emits engine pipeline milestones over the `analyze://progress` Tauri event so the

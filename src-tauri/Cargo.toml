@@ -35,7 +35,7 @@ tree-sitter-rust = "0.24"
 # rustls-tls (default-features=false) removes the native-tls/OpenSSL dep for simpler
 # 3-OS Tauri builds. `stream` is reserved for the later SSE summary path.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 futures-util = "0.3"
 async-trait = "0.1"
 
