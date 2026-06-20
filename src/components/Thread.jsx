@@ -72,10 +72,13 @@ export function Thread({
       animation: closing
         ? 'loupe-thread-out 0.17s var(--ease-out) forwards'
         : 'loupe-thread-in var(--dur-slow) var(--ease-out)',
-      padding: '12px 14px', ...style,
+      // Generous top padding: the action buttons + first content sit well clear
+      // of the top edge, so even if a pixel or two gets clipped near the sticky
+      // header the buttons stay fully visible (top zone is just padding).
+      padding: '22px 16px 14px', ...style,
     }}>
       {/* quiet top-right actions: collapse + resolve */}
-      <div style={{ position: 'absolute', top: 9, right: 10, display: 'flex', gap: 2 }}>
+      <div style={{ position: 'absolute', top: 16, right: 12, display: 'flex', gap: 2 }}>
         <button onClick={closeWith(onToggle)} title="Collapse" style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           width: 24, height: 24, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
