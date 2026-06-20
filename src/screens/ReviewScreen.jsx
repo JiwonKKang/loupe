@@ -101,6 +101,12 @@ export default function ReviewScreen(props) {
   // The set of thread ids that were open on the previous render — diffed against
   // the current open set to detect which thread was JUST opened this commit.
   const prevOpenIds = React.useRef(new Set());
+  // The opaque sticky column header. We measure its REAL height (it is ~25px:
+  // 7+7 padding + 11px text + 1px border, not the 44 that was hard-coded) so the
+  // scroll-correction below reveals a thread by exactly the header it must clear,
+  // and so the open-thread wrapper's scrollMarginTop matches it.
+  const headerRef = React.useRef(null);
+  const [headerH, setHeaderH] = React.useState(26);
 
   // ---- Build aligned split rows (before | after) from the unified line list.
   const rows = React.useMemo(() => {
@@ -307,6 +313,17 @@ export default function ReviewScreen(props) {
 
   const N = display.length;
 
+  // Measure the sticky column header's real height (mount + per card remount +
+  // when the code font changes its line metrics). Used by the scroll-correction
+  // effect and the open-thread wrapper's scrollMarginTop. Layout effect so the
+  // value is correct before the first paint that could need it.
+  React.useLayoutEffect(() => {
+    if (headerRef.current) {
+      const h = headerRef.current.offsetHeight;
+      if (h > 0) setHeaderH((prev) => (Math.abs(prev - h) > 0.5 ? h : prev));
+    }
+  }, [card.id, codeFs]);
+
   // Prefix-sum offsets of every item top (offsets[i]) and the total height.
   // (totalH, not `total` — that prop is the card count.) Recomputed when the
   // item list, font (RH), or a fresh measurement changes.
@@ -378,42 +395,65 @@ export default function ReviewScreen(props) {
 
   // When a thread is opened, its wrapper (which holds the resolve/collapse
   // buttons at its top) can sit underneath the opaque sticky column header
-  // (top:0, zIndex:2) and be hidden. Detect the thread that was JUST opened
-  // this commit and scroll the diff container so that thread's top clears the
-  // sticky header. Runs before paint (useLayoutEffect) so the user never sees
-  // the clipped state. Top-level hook (no early return in this component).
+  // (top:0, zIndex:2) and be hidden. We scroll the diff container so the thread's
+  // top clears the sticky header. Runs before paint (useLayoutEffect) so the user
+  // never sees the clipped state. Top-level hook (no early return).
+  //
+  // The thread that was just opened and still needs its scroll settled. The
+  // measure ref re-renders (setMeasureTick) AFTER this thread's height grows,
+  // which re-lays-out the virtualization spacers and slides the corrected thread
+  // back under the header. So we don't correct only on the open commit: we latch
+  // the id here and keep re-correcting on every subsequent commit (incl. the
+  // measureTick re-renders) until the position is stable, then clear the latch.
+  const pendingReveal = React.useRef(null);
   React.useLayoutEffect(() => {
     const openIds = new Set(threads.filter((t) => t.open).map((t) => t.id));
     // Find an id that is open now but was NOT open on the previous render.
     let justOpened = null;
     openIds.forEach((id) => { if (!prevOpenIds.current.has(id)) justOpened = id; });
     prevOpenIds.current = openIds;
-    if (!justOpened) return;
-    const el = threadEls.current[justOpened];
+    // Latch a freshly-opened thread; otherwise keep settling the latched one.
+    if (justOpened) pendingReveal.current = justOpened;
+    const target = pendingReveal.current;
+    if (!target) return;
+    // If the latched thread is no longer open (collapsed/resolved), drop it.
+    if (!openIds.has(target)) { pendingReveal.current = null; return; }
+    const el = threadEls.current[target];
     const cont = diffRef.current;
-    if (!el || !cont) return;
+    if (!el || !cont) { pendingReveal.current = null; return; }
     // Bring the whole opened thread into view between the sticky column header
     // (top) and the sticky h-scrollbar (bottom). Handles BOTH cases: top hidden
     // under the header → scroll up; bottom spilling past the viewport → scroll
     // down. (The earlier version only handled the top, so a thread opening low
     // in the viewport stayed clipped below its action buttons.)
-    const HEADER = 44; // sticky column-header height
-    const FOOTER = 44; // sticky bottom h-scrollbar height
+    const HEADER = headerH; // measured sticky column-header height (~25px, not 44)
+    const FOOTER = 12;      // sticky bottom h-scrollbar (~8px bar + slack)
     const cR = cont.getBoundingClientRect();
     const eR = el.getBoundingClientRect();
     const viewTop = cR.top + HEADER;
     const viewBot = cR.bottom - FOOTER;
+    let delta = 0;
     if (eR.height >= viewBot - viewTop) {
-      cont.scrollTop += eR.top - viewTop;            // taller than viewport → align its top
-    } else if (eR.top < viewTop) {
-      cont.scrollTop += eR.top - viewTop - 8;        // top hidden under header → reveal top
+      delta = eR.top - viewTop - 8;                  // taller than viewport → align its top (clear header)
+    } else if (eR.top < viewTop + 8) {
+      delta = eR.top - viewTop - 8;                  // top hidden/touching header → reveal top
     } else if (eR.bottom > viewBot) {
-      cont.scrollTop += eR.bottom - viewBot + 8;     // bottom spills below → scroll down to reveal
+      delta = eR.bottom - viewBot + 8;               // bottom spills below → scroll down to reveal
     }
-    // threads: re-run when any thread opens/closes. card.id: a card switch
-    // remounts the diff container, so re-evaluate against the fresh node.
+    if (Math.abs(delta) > 0.5) {
+      cont.scrollTop += delta;                       // (browser clamps to [0, max]; zIndex:3 covers the clamp case)
+      // Position not yet settled this commit — keep the latch so the next commit
+      // (e.g. the measureTick re-render) re-checks and finishes the job.
+    } else {
+      pendingReveal.current = null;                  // settled within tolerance → stop.
+    }
+    // threads: re-run when a thread opens/closes. card.id: a card switch remounts
+    // the diff container. measureTick: the measure ref's re-layout moves the
+    // thread, so re-settle the scroll AFTER measurement lands (this is the deps
+    // entry that fixes the clip — the old effect ran once and was invalidated by
+    // the very next measure render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threads, card.id]);
+  }, [threads, card.id, measureTick, headerH]);
 
   const Ico = ({ d, w = 15 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -628,7 +668,7 @@ export default function ReviewScreen(props) {
               background: 'var(--surface-inset)', '--hs-old': '0px', '--hs-new': '0px' }}>
 
               {/* sticky column headers */}
-              <div style={{ display: 'flex', position: 'sticky', top: 0, zIndex: 2,
+              <div ref={headerRef} style={{ display: 'flex', position: 'sticky', top: 0, zIndex: 2,
                 background: 'var(--surface-inset)',
                 borderBottom: '1px solid var(--border-subtle)' }}>
                 <div style={{ flex: '1 1 0', minWidth: 0, padding: '7px 0 7px 73px',
@@ -686,7 +726,18 @@ export default function ReviewScreen(props) {
                     </div>
                     {thread && thread.open && (
                       <div ref={(el) => { if (el) threadEls.current[thread.id] = el; }}
-                        style={{ padding: '8px 28px 12px 52px' }}>
+                        style={{ padding: '8px 28px 12px 52px',
+                          // The sticky column header is opaque (--surface-inset) and sits at
+                          // zIndex 2. Without its own stacking context an open thread paints
+                          // at z-auto (0) and the header overpaints its top ~12px (rounded
+                          // corner + the action buttons) whenever a re-layout slides the
+                          // thread back under the header (e.g. the measure-driven re-render
+                          // below, or a clamped scrollTop). Giving the wrapper its own layer
+                          // ABOVE the header guarantees the header can never clip the thread,
+                          // independent of scroll timing. scrollMarginTop reserves the header's
+                          // height so scroll-into-view / clamp(scrollTop=0) still clear it.
+                          position: 'relative', zIndex: 3,
+                          scrollMarginTop: (headerH + 8) + 'px' }}>
                         <Thread messages={thread.messages} resolved={thread.resolved}
                           pending={thread.pending}
                           collapsed={false} onToggle={() => onOpenLine(thread.side || 'old', r)}
@@ -720,7 +771,10 @@ export default function ReviewScreen(props) {
               {/* horizontal scrollbars — one per side, pinned at the bottom. These
                   are the ONLY horizontal controls: each onScroll writes its side's
                   CSS variable, which every code line of that side translates by. */}
-              <div style={{ display: 'flex', position: 'sticky', bottom: 0, zIndex: 2,
+              {/* zIndex 4: stays ABOVE open threads (now zIndex 3 so the header
+                  can't clip them). Threads must paint UNDER this bottom scrollbar,
+                  same as before the z bump, so the h-bars remain visible/usable. */}
+              <div style={{ display: 'flex', position: 'sticky', bottom: 0, zIndex: 4,
                 background: 'var(--surface-inset)' }}>
                 <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex' }}>
                   <div style={{ width: GUTTER, flex: 'none' }} />
