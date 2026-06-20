@@ -13,12 +13,24 @@ export function Thread({
   pending = false,
   collapsed = false,
   unread = false,
+  model = 'sonnet',
+  onSetModel,
   onToggle,
   onResolve,
   onSend,
   style = {},
 }) {
   const [draft, setDraft] = React.useState('');
+  // #autofocus — when an open thread mounts (created by drag/click, or expanded),
+  // drop the caret straight into its composer so the reviewer can type at once.
+  // ref + layout effect (rather than the autoFocus attr) so it also fires when a
+  // collapsed thread is re-opened (the textarea remounts) and runs before paint.
+  const taRef = React.useRef(null);
+  React.useLayoutEffect(() => {
+    if (!collapsed && !resolved && taRef.current) {
+      taRef.current.focus({ preventScroll: true });
+    }
+  }, [collapsed, resolved]);
   // Collapse/resolve play a brief "fold up" exit before the parent unmounts the
   // open thread (it swaps in the small badge). We stay mounted for the animation,
   // then fire the real action. Transform/opacity only — no height animation (that
@@ -138,7 +150,12 @@ export function Thread({
 
       {!resolved && (
         <div style={{ marginTop: 11, paddingTop: 9, borderTop: '1px solid var(--border-subtle)' }}>
+          {/* #model + composer: the model segment sits to the LEFT of the textarea,
+              so the choice (accuracy vs speed) reads before you type. */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <ModelMenu model={model} onSetModel={onSetModel} />
           <textarea
+            ref={taRef}
             value={draft}
             rows={1}
             onChange={(e) => { setDraft(e.target.value);
@@ -152,12 +169,13 @@ export function Thread({
             }}
             placeholder="질문을 남기거나, 변경을 요청하세요…"
             style={{
-              width: '100%', boxSizing: 'border-box', resize: 'none', overflow: 'hidden',
-              minHeight: 20, maxHeight: 160, display: 'block',
+              flex: 1, minWidth: 0, boxSizing: 'border-box', resize: 'none', overflow: 'hidden',
+              minHeight: 20, maxHeight: 160, display: 'block', marginTop: 3,
               background: 'transparent', border: 'none',
               color: 'var(--text-primary)', font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)', outline: 'none',
             }}
           />
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
             <span style={{ flex: 1 }} />
             {(() => {
@@ -186,6 +204,45 @@ export function Thread({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * ModelMenu — compact segmented control to the left of the composer. Picks the
+ * model that answers THIS thread: Sonnet (정확) or Haiku (빠름). Shows the current
+ * choice and calls onSetModel on change. Disabled (read-only display) when no
+ * onSetModel is wired. Design-token only; sized to align with the composer top.
+ */
+function ModelMenu({ model = 'sonnet', onSetModel }) {
+  const opts = [
+    { id: 'sonnet', label: 'Sonnet', hint: '정확' },
+    { id: 'haiku', label: 'Haiku', hint: '빠름' },
+  ];
+  return (
+    <div role="group" aria-label="모델 선택" title="이 스레드에 답할 모델"
+      style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: 1,
+        padding: 2, borderRadius: 'var(--radius-pill)',
+        background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)' }}>
+      {opts.map((o) => {
+        const on = model === o.id;
+        return (
+          <button key={o.id} type="button" aria-pressed={on} title={`${o.label} · ${o.hint}`}
+            disabled={!onSetModel}
+            onClick={() => { if (onSetModel && !on) onSetModel(o.id); }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, height: 18, padding: '0 8px',
+              borderRadius: 'var(--radius-pill)', border: 'none', whiteSpace: 'nowrap',
+              cursor: onSetModel ? (on ? 'default' : 'pointer') : 'default',
+              background: on ? 'var(--accent-dim)' : 'transparent',
+              color: on ? 'var(--accent)' : 'var(--text-tertiary)',
+              font: `var(--weight-medium) 10px/1 var(--font-ui)`,
+              transition: 'var(--t-hover)' }}>
+            {o.label}
+            <span style={{ font: '8px/1 var(--font-ui)',
+              color: on ? 'var(--accent)' : 'var(--text-faint)', opacity: on ? 0.85 : 1 }}>{o.hint}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

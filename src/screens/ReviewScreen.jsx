@@ -87,7 +87,7 @@ export default function ReviewScreen(props) {
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
     onPass, onPrev, onNext, onJumpUnresolved,
-    threads, onOpenLine, onResolve, onSend,
+    threads, onOpenLine, onResolve, onSend, onSetThreadModel,
     // #8/#9 shared contract — set of threadId with an arrived AI reply that has
     // not yet been read (read = expanding that thread). App owns the set; when it
     // doesn't pass one yet, default to an empty Set so `.has(...)` stays safe.
@@ -742,6 +742,8 @@ export default function ReviewScreen(props) {
                           scrollMarginTop: (headerH + 8) + 'px' }}>
                         <Thread messages={thread.messages} resolved={thread.resolved}
                           pending={thread.pending}
+                          model={thread.model || 'sonnet'}
+                          onSetModel={onSetThreadModel ? (m) => onSetThreadModel(thread.id, m) : undefined}
                           collapsed={false} onToggle={() => onOpenLine(thread.side || 'old', r)}
                           onResolve={() => onResolve(thread.id)} onSend={(t, kind) => onSend(thread.id, t, kind)} />
                       </div>

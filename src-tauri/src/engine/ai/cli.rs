@@ -56,9 +56,17 @@ use std::time::Duration;
 /// Default CLI binary name (resolved on `PATH`).
 const DEFAULT_CLAUDE_BIN: &str = "claude";
 
-/// CLI model alias the codebase-aware agent runs on. The spec pins Sonnet by full id; the
-/// CLI accepts both bare aliases and full names, so this is sent verbatim to `--model`.
+/// Default CLI model alias the codebase-aware agent runs on when no explicit model id is
+/// passed. The CLI accepts both bare aliases and full names, so this is sent verbatim to
+/// `--model`. Callers now pass a concrete id (mapped from the thread's model choice), so this
+/// is only a fallback default.
 const AGENTIC_MODEL: &str = "claude-sonnet-4-6";
+
+/// Hard cap on the number of agentic turns (model ⇄ tool-call loops) for one read-only run.
+/// Without a ceiling, the agent could explore the repo indefinitely; pinning it bounds latency
+/// and token spend. Sent as `--max-turns 8` (verified accepted by the `claude` CLI; the flag
+/// is not surfaced in `--help` but parses and runs).
+const AGENTIC_MAX_TURNS: u32 = 8;
 
 /// Read-only tool allowlist for the agent. Only file *reading* / *searching* tools are
 /// granted — `Read` (open a file), `Grep` (content search), `Glob` (path search), `LS`
@@ -69,8 +77,14 @@ const AGENTIC_ALLOWED_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS"];
 /// Defense-in-depth deny-list: even if a future default ever flipped a mutating/exec tool
 /// on, these are explicitly forbidden. The allowlist above is the primary gate; this is a
 /// belt-and-braces second barrier against modifying or executing anything in the user repo.
+///
+/// Every name here must be a tool the installed `claude` CLI actually knows: an unrecognized
+/// deny entry makes the CLI print `Permission deny rule "X" matches no known tool — check for
+/// typos.` to stderr on *every* agentic call (verified against 2.1.183). The former `MultiEdit`
+/// entry was such a stale name (multi-file editing folded into `Edit`, which is already denied),
+/// so it was removed — the write/exec surface stays fully blocked by `Write`/`Edit`/`Bash`/etc.
 const AGENTIC_DISALLOWED_TOOLS: &[&str] =
-    &["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"];
+    &["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"];
 
 /// Hard wall-clock cap for one agentic call. Agents read files / run searches in a loop, so
 /// they are far slower than a single completion; without a cap a stuck turn (e.g. waiting on
@@ -90,8 +104,8 @@ const CLI_MODEL_FAST: &str = "haiku";
 
 /// `model_for` still reports the concrete alias ids the rest of the engine uses, so the
 /// `LlmProvider` contract is unchanged (tests assert these).
-const MODEL_QUALITY_ID: &str = "claude-sonnet-4-6";
-const MODEL_FAST_ID: &str = "claude-haiku-4-5";
+pub const MODEL_QUALITY_ID: &str = "claude-sonnet-4-6";
+pub const MODEL_FAST_ID: &str = "claude-haiku-4-5";
 
 /// A provider that fulfils completions by shelling out to the `claude` CLI. Holds the
 /// setup-token (passed to the child via env) and the binary path (overridable for tests).
@@ -255,14 +269,18 @@ fn parse_wrapper(wrapper: &Value) -> Result<CompletionResponse, LlmError> {
 /// `--permission-mode default` means anything not on the allowlist is *denied* (in `-p`
 /// non-interactive mode there is no prompt to hang on — the model is just told it can't use
 /// that tool), so the agent can never modify or execute anything in the user's repo.
-fn build_agentic_args(prompt: &str) -> Vec<String> {
+fn build_agentic_args(prompt: &str, model: &str) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         prompt.to_string(),
         "--model".into(),
-        AGENTIC_MODEL.into(),
+        model.to_string(),
         "--output-format".into(),
         "json".into(),
+        // Bound the agentic loop: at most AGENTIC_MAX_TURNS model⇄tool iterations, so the agent
+        // cannot explore the repo indefinitely (caps latency + token spend).
+        "--max-turns".into(),
+        AGENTIC_MAX_TURNS.to_string(),
         // Non-interactive: deny anything not explicitly allowed (no auto-accept of writes/
         // exec), and in -p mode there is no permission prompt to block on.
         "--permission-mode".into(),
@@ -325,15 +343,18 @@ fn extract_agentic_result(wrapper: &Value) -> Result<String, String> {
 ///    argv, never logged**.
 ///  - a 600 s `tokio::time::timeout` caps a stuck run so the Tauri command can never hang.
 ///
-/// `bin` overrides the binary (a stub script in tests); `None` uses the default on `PATH`.
+/// `model` is the concrete CLI model id to run on (the caller maps the thread's choice — e.g.
+/// `claude-sonnet-4-6` / `claude-haiku-4-5`). `bin` overrides the binary (a stub script in
+/// tests); `None` uses the default on `PATH`. The agentic loop is capped at `AGENTIC_MAX_TURNS`.
 pub async fn ask_agentic(
     token: String,
     repo_path: String,
     prompt: String,
+    model: &str,
     bin: Option<String>,
 ) -> Result<String, String> {
     let bin = bin.unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string());
-    let args = build_agentic_args(&prompt);
+    let args = build_agentic_args(&prompt, model);
 
     // The CLI is blocking; run it on the blocking pool. The closure owns everything it needs.
     let spawn = tokio::task::spawn_blocking(move || {
@@ -676,12 +697,12 @@ mod tests {
     // ---- ask_agentic (codebase-aware, read-only) ----
 
     #[test]
-    fn agentic_args_request_json_output_and_pin_sonnet() {
-        let a = build_agentic_args("explain foo");
+    fn agentic_args_request_json_output_and_pass_model() {
+        let a = build_agentic_args("explain foo", "claude-sonnet-4-6");
         // -p <prompt>
         let p_idx = a.iter().position(|x| x == "-p").unwrap();
         assert_eq!(a[p_idx + 1], "explain foo");
-        // --model claude-sonnet-4-6
+        // --model <whatever the caller passed>
         let m_idx = a.iter().position(|x| x == "--model").unwrap();
         assert_eq!(a[m_idx + 1], "claude-sonnet-4-6");
         // --output-format json
@@ -691,8 +712,26 @@ mod tests {
     }
 
     #[test]
+    fn agentic_args_pass_through_haiku_model() {
+        // The model is parameterized — a different id flows straight to --model.
+        let a = build_agentic_args("q", "claude-haiku-4-5");
+        let m_idx = a.iter().position(|x| x == "--model").unwrap();
+        assert_eq!(a[m_idx + 1], "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn agentic_args_cap_turns_at_eight() {
+        let a = build_agentic_args("q", "claude-sonnet-4-6");
+        // --max-turns 8 bounds the agentic loop.
+        assert!(
+            a.windows(2).any(|w| w[0] == "--max-turns" && w[1] == "8"),
+            "expected `--max-turns 8`, got {a:?}"
+        );
+    }
+
+    #[test]
     fn agentic_args_allow_only_read_only_tools() {
-        let a = build_agentic_args("q");
+        let a = build_agentic_args("q", "claude-sonnet-4-6");
         let allow_idx = a
             .iter()
             .position(|x| x == "--allowedTools")
@@ -703,7 +742,7 @@ mod tests {
 
     #[test]
     fn agentic_args_never_allow_write_or_exec_tools() {
-        let a = build_agentic_args("q");
+        let a = build_agentic_args("q", "claude-sonnet-4-6");
         // Bound the allow-list region: between --allowedTools and the next flag.
         let allow_idx = a.iter().position(|x| x == "--allowedTools").unwrap();
         let allow_end = a[allow_idx + 1..]
@@ -730,11 +769,19 @@ mod tests {
                 "{forbidden} must be on the deny-list"
             );
         }
+        // Regression: the deny-list must not name a tool the CLI doesn't know — an
+        // unrecognized entry triggers a `matches no known tool` stderr warning on every
+        // agentic call (e.g. the removed `MultiEdit`). The write/exec surface stays blocked
+        // by the live names above.
+        assert!(
+            !a.iter().any(|t| t == "MultiEdit"),
+            "MultiEdit is not a known CLI tool — it must not appear in the deny-list"
+        );
     }
 
     #[test]
     fn agentic_args_use_non_auto_permission_mode() {
-        let a = build_agentic_args("q");
+        let a = build_agentic_args("q", "claude-sonnet-4-6");
         let idx = a.iter().position(|x| x == "--permission-mode").unwrap();
         let mode = &a[idx + 1];
         // Must NOT be a mode that auto-grants writes/exec.
@@ -797,6 +844,7 @@ mod tests {
             "tok".into(),
             dir.to_string_lossy().into_owned(),
             "where is foo()?".into(),
+            "claude-sonnet-4-6",
             Some(bin.to_string_lossy().into_owned()),
         )
         .await
@@ -812,6 +860,7 @@ mod tests {
             "tok".into(),
             std::env::temp_dir().to_string_lossy().into_owned(),
             "q".into(),
+            "claude-sonnet-4-6",
             Some("/nonexistent/claude_binary_xyz".into()),
         )
         .await

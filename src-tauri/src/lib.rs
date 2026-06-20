@@ -139,12 +139,18 @@ struct ThreadTurn {
 
 /// Ask a **codebase-aware** follow-up question about a selected region of a diff.
 ///
-/// The front-end calls `invoke('ask_thread', { token, repoPath, context, question, history })`
+/// The front-end calls
+/// `invoke('ask_thread', { token, repoPath, context, question, history, model })`
 /// (Tauri maps the camelCase `repoPath` to `repo_path`, same as `load_review` / `analyze_review`).
 /// `context` is the front-end-assembled string (card symbol/path + a windowed diff excerpt + a
 /// "user is asking about line N (side)" marker); `question` is the user's current message;
-/// `history` is the prior turns of this thread (this question excluded). The reply is a plain
-/// string (the agent's natural-language answer).
+/// `history` is the prior turns of this thread (this question excluded); `model` is the per-thread
+/// model choice (`"sonnet"` | `"haiku"`, default Sonnet). The reply is a plain string (the agent's
+/// natural-language answer).
+///
+/// `model` is mapped to a concrete CLI model id — `"haiku"` ⇒ `MODEL_FAST_ID` (`claude-haiku-4-5`),
+/// anything else (including `"sonnet"`, empty, or unknown) ⇒ `MODEL_QUALITY_ID`
+/// (`claude-sonnet-4-6`) — then passed to `ask_agentic`. The agentic loop is turn-capped there.
 ///
 /// Unlike the old prompt-only path (which saw *only* the diff), this runs the `claude` CLI as a
 /// **read-only agent** in the repo: it can open real files, grep for definitions/callers, and
@@ -162,8 +168,16 @@ async fn ask_thread(
     context: String,
     question: String,
     history: Vec<ThreadTurn>,
+    model: String,
 ) -> Result<String, String> {
     let token = validate_token(&token)?;
+
+    // Map the per-thread model choice to a concrete CLI model id. Only "haiku" selects the fast
+    // model; everything else (sonnet / empty / unknown) falls back to the quality model.
+    let model_id = match model.as_str() {
+        "haiku" => engine::ai::cli::MODEL_FAST_ID,
+        _ => engine::ai::cli::MODEL_QUALITY_ID,
+    };
 
     // Prompt: tell the agent it is reviewing a real repo, give it the diff context + the user's
     // selected question, and invite it to read the relevant code (definitions / callers / related
@@ -193,7 +207,7 @@ async fn ask_thread(
     prompt.push_str("\nUser: ");
     prompt.push_str(&question);
 
-    engine::ai::cli::ask_agentic(token, repo_path, prompt, None).await
+    engine::ai::cli::ask_agentic(token, repo_path, prompt, model_id, None).await
 }
 
 /// Re-emits engine pipeline milestones over the `analyze://progress` Tauri event so the

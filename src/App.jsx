@@ -389,9 +389,22 @@ export default function App() {
     // messages). The first real AI text arrives only after the user asks.
     setThreads((p) => [...p, {
       id, cardId: card.id, side: side || 'old', lineN, symbol: card.symbol, open: true, resolved: false,
-      messages: [], pending: false,
+      messages: [], pending: false, model: 'sonnet',
     }]);
   };
+
+  // Per-thread model choice (#model): which CLI model answers this thread's
+  // questions. 'sonnet' (default, accurate) or 'haiku' (faster). Updates only
+  // the named thread; identity-stable when unchanged.
+  const setThreadModel = (id, model) => setThreads((p) => {
+    let changed = false;
+    const next = p.map((t) => {
+      if (t.id !== id || t.model === model) return t;
+      changed = true;
+      return { ...t, model };
+    });
+    return changed ? next : p;
+  });
 
   // Build the `context` string the backend sees: which symbol/file, a diff
   // excerpt (windowed around the asked row for big cards), and which line the
@@ -441,7 +454,10 @@ export default function App() {
     // Mark the thread as thinking (spinner row in Thread.jsx).
     setThreads((p) => p.map((x) => x.id === id ? { ...x, pending: true } : x));
 
-    invoke('ask_thread', { token, repoPath, context, question: text, history })
+    // Per-thread model (#model): the chosen CLI model for this thread, defaulting
+    // to 'sonnet' for any thread created before the field existed.
+    const model = (t && t.model) || 'sonnet';
+    invoke('ask_thread', { token, repoPath, context, question: text, history, model })
       .then((answer) => {
         let landedThread = null;
         setThreads((p) => p.map((x) => {
@@ -596,6 +612,7 @@ export default function App() {
           onPass={pass} onPrev={prev} onNext={next}
           threads={cardThreads}
           onOpenLine={openLine} onResolve={resolveThread} onSend={sendThread}
+          onSetThreadModel={setThreadModel}
         />
       )}
       {screen === 'summary' && (
