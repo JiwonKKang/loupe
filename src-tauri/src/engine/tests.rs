@@ -981,7 +981,7 @@ fn stage2_card_fields_serialize_as_camelcase_without_disturbing_stage1_keys() {
 #[test]
 fn review_data_serializes_stage2_fields_as_camelcase() {
     // m1: ReviewData's new fields are camelCase (clusterOrder / orderedCardIds /
-    // headSha / baseSha / mergeSuggestions / splitSuggestions / jitDefs) and `cards`
+    // headSha / baseSha / mergeSuggestions / splitSuggestions) and `cards`
     // is unchanged. A Stage-1-only build_review fills everything else with defaults.
     let data = super::model::ReviewData::default();
     let v = serde_json::to_value(&data).unwrap();
@@ -992,7 +992,6 @@ fn review_data_serializes_stage2_fields_as_camelcase() {
         "clusterOrder",
         "orderedCardIds",
         "unclustered",
-        "jitDefs",
         "headSha",
         "baseSha",
         "analysis",

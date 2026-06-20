@@ -32,8 +32,6 @@ pub struct ReviewData {
     pub ordered_card_ids: Vec<String>,
     /// [new] Card ids that fell into the Unclustered bucket (§3.1 — always shown).
     pub unclustered: Vec<String>,
-    /// [new] Just-in-time definition cards injected into the ordered list (§5).
-    pub jit_defs: Vec<JitDefinition>,
     /// [new] Head SHA — cache key / "same head == same order" marker.
     pub head_sha: String,
     /// [new] Base (merge-base) SHA — the 3-dot diff depends on it; cache key.
@@ -141,37 +139,6 @@ pub enum ClusterKind {
     Infra,
 }
 
-/// §5 JIT — a "definition overview" pseudo-card slotted between real cards. The
-/// front-end branches on its presence (`jitDefs` ⊇ id) to render an overview panel
-/// instead of a diff.
-#[derive(Serialize, Debug, Clone, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct JitDefinition {
-    /// "jit-<symbolid>" (stable).
-    pub id: String,
-    /// e.g. "OrderDraft".
-    pub symbol: String,
-    pub path: String,
-    pub overview: DefinitionOverview,
-    /// This card id is the one the definition is injected *before*.
-    pub injected_before: String,
-}
-
-/// The structured overview shown for a JIT definition (fields/ctor/methods extracted
-/// by tree-sitter; `role` optionally filled by the AI label step).
-#[derive(Serialize, Debug, Clone, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct DefinitionOverview {
-    /// AI one-liner (None when absent).
-    pub role: Option<String>,
-    /// Field signatures extracted by tree-sitter.
-    pub fields: Vec<String>,
-    pub constructor: Option<String>,
-    pub public_methods: Vec<String>,
-    /// Methods changed in this PR (= intersection with changed symbols).
-    pub changed_methods: Vec<String>,
-}
-
 /// §6.3 merge/split suggestion — display only, never auto-applied.
 /// `Deserialize` so the ⑦ cache can round-trip a stored `ClusterLayout` (which holds these).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -214,10 +181,6 @@ pub enum SymbolKind {
     Migration,
     Config,
     File,
-    /// §5 JIT — a synthetic "definition overview" pseudo-card (not a real diff). The
-    /// front-end branches on `card.kind === 'definition'` to render the overview panel
-    /// (looked up in `jit_defs` by the card id) instead of a diff.
-    Definition,
 }
 
 /// How a symbol changed in this PR.

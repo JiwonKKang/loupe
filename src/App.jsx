@@ -75,10 +75,6 @@ export default function App() {
   const [clusterOrder, setClusterOrder] = React.useState([]);
   const [orderedCardIds, setOrderedCardIds] = React.useState([]);
   const [unclustered, setUnclustered] = React.useState([]);
-  // §5 JIT — structured definition overviews keyed by their pseudo-card id (camelCase
-  // `jitDefs` from the engine). ReviewScreen matches `card.id` against these to render an
-  // overview panel for `kind === 'definition'` cards. Empty ⇒ no definition cards (degrades).
-  const [jitDefs, setJitDefs] = React.useState([]);
   const [analysisState, setAnalysisState] = React.useState('idle');
   // Live loader progress (AnalyzeScreen), driven by `analyze://progress` events.
   const [progress, setProgress] = React.useState(INITIAL_PROGRESS);
@@ -122,7 +118,7 @@ export default function App() {
     setVerdicts({});
     setThreads([]);
     // Reset the cluster overlay for the new project.
-    setClusters([]); setClusterOrder([]); setOrderedCardIds([]); setUnclustered([]); setJitDefs([]);
+    setClusters([]); setClusterOrder([]); setOrderedCardIds([]); setUnclustered([]);
     setAnalysisState('clustering');
     setProgress(INITIAL_PROGRESS); // fresh loader for this project
     const seq = ++analyzeSeq.current;
@@ -149,7 +145,6 @@ export default function App() {
     setClusterOrder(data.clusterOrder || []);
     setOrderedCardIds(data.orderedCardIds || []);
     setUnclustered(data.unclustered || []);
-    setJitDefs(data.jitDefs || []);
     setAnalysisState(data.analysis === 'fallback' ? 'fallback' : 'done');
     setLoadError(null);
   }, []);
@@ -447,7 +442,6 @@ export default function App() {
           hasPrev={index > 0} hasNext={index < list.length - 1}
           onPass={pass} onPrev={prev} onNext={next}
           threads={cardThreads}
-          jitDefs={jitDefs}
           onOpenLine={openLine} onResolve={resolveThread} onSend={sendThread}
         />
       )}

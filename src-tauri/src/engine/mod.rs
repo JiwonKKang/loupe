@@ -13,7 +13,6 @@ mod cache;
 mod cards;
 mod clustercard;
 mod gitdiff;
-mod jitdef;
 mod model;
 mod progress;
 mod relations;
@@ -27,8 +26,8 @@ pub use model::ReviewData;
 // Re-exported for downstream/testing consumers of the contract types.
 #[allow(unused_imports)]
 pub use model::{
-    AnalysisState, ChangeType, Cluster, ClusterKind, DefinitionOverview, JitDefinition, ReviewCard,
-    ReviewLine, Suggestion, SymbolKind,
+    AnalysisState, ChangeType, Cluster, ClusterKind, ReviewCard, ReviewLine, Suggestion,
+    SymbolKind,
 };
 // Stage-② relation/seed layer (pure, no AI). IPC wiring is deferred.
 #[allow(unused_imports)]
@@ -415,68 +414,7 @@ pub async fn analyze_review(
 
     fold_layout(&mut review, layout, shas);
 
-    // ⑨ JIT definition injection (planning §5): post-pass over the *final* `ordered_card_ids`
-    // — slot a structured definition overview just before the first changed card that uses a
-    // type/class/struct whose definition isn't itself in the diff. Pure & deterministic; on no
-    // eligible target it is a no-op (jit_defs empty, order unchanged ⇒ identical behaviour).
-    inject_jit_defs(&mut review, repo_path, base, target)?;
     Ok(review)
-}
-
-/// ⑨ Fold the JIT definition pass onto a fully-laid-out [`ReviewData`] (planning §5).
-///
-/// Recomputes the diff + changed symbols (pure, deterministic — the same inputs Stage-②
-/// used) and resolves which referenced type/class/struct definitions are **not** themselves
-/// changed but are needed to follow the flow. For each, a `kind == Definition` pseudo-card is
-/// appended to `review.cards`, the structured overview is recorded in `review.jit_defs`, and
-/// the card id is spliced into `review.ordered_card_ids` just before its first user.
-///
-/// Degradation: no eligible target ⇒ `jit_defs` stays empty, `cards`/`ordered_card_ids`
-/// untouched (byte-identical to the pre-⑨ payload). Never drops or reorders existing cards.
-fn inject_jit_defs(
-    review: &mut ReviewData,
-    repo_path: &str,
-    base: &str,
-    target: &str,
-) -> Result<(), EngineError> {
-    let diff = gitdiff::diff_three_dot(repo_path, base, target)?;
-    let analysis = analyze_relations(repo_path, base, target)?;
-
-    let mut injection =
-        jitdef::compute_jit_defs(&diff, &analysis.changed, &review.ordered_card_ids);
-    if injection.jit_defs.is_empty() {
-        return Ok(()); // no eligible definition ⇒ no-op (identical to pre-⑨ behaviour).
-    }
-
-    // Stamp each definition pseudo-card with the cluster of the card it is injected *before*
-    // (its first user). The ProgressSpine groups by `cluster_id` over consecutive items, so an
-    // un-stamped definition would split its user's cluster run into a stray "기타 변경" group
-    // sitting in the middle of the flow. Inheriting the user's cluster keeps the definition
-    // visually attached to the change it explains — and `kind == Definition` still drives the
-    // overview render, so this only affects spine grouping, not the panel. (`injected_before`
-    // resolves to a real, already-laid-out card by construction; missing ⇒ leave unclustered.)
-    let cluster_by_id: std::collections::HashMap<&str, Option<String>> = review
-        .cards
-        .iter()
-        .map(|c| (c.id.as_str(), c.cluster_id.clone()))
-        .collect();
-    let before_by_def: std::collections::HashMap<&str, &str> = injection
-        .jit_defs
-        .iter()
-        .map(|jd| (jd.id.as_str(), jd.injected_before.as_str()))
-        .collect();
-    for card in &mut injection.cards {
-        if let Some(before) = before_by_def.get(card.id.as_str()) {
-            if let Some(cid) = cluster_by_id.get(before) {
-                card.cluster_id = cid.clone();
-            }
-        }
-    }
-
-    review.ordered_card_ids = jitdef::splice_ordered(&review.ordered_card_ids, &injection.jit_defs);
-    review.cards.extend(injection.cards);
-    review.jit_defs = injection.jit_defs;
-    Ok(())
 }
 
 /// Distinct changed-file count, for the loader's "Scanning the diff · N files" line. Counts
