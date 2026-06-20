@@ -214,6 +214,10 @@ pub enum SymbolKind {
     Migration,
     Config,
     File,
+    /// §5 JIT — a synthetic "definition overview" pseudo-card (not a real diff). The
+    /// front-end branches on `card.kind === 'definition'` to render the overview panel
+    /// (looked up in `jit_defs` by the card id) instead of a diff.
+    Definition,
 }
 
 /// How a symbol changed in this PR.

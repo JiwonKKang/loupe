@@ -80,6 +80,111 @@ function TextSizeMenu({ size, effective, onChange }) {
   );
 }
 
+// ─── JIT definition overview ─────────────────────────────────────────────────
+// A definition pseudo-card renders structural *context* (role / fields / ctor /
+// public methods), NOT a diff. It is slotted in just before the symbol's first
+// use so the reviewer meets the shape before reading code that depends on it.
+// `overview` = JitDefinition.overview (camelCase) matched by card.id in App; when
+// absent (no jitDefs / no match) we degrade to a minimal "no details" panel.
+function DefinitionPanel({ card, overview }) {
+  const ov = overview || {};
+  const fields = ov.fields || [];
+  const publicMethods = ov.publicMethods || [];
+  const changed = new Set(ov.changedMethods || []);
+  // A method signature's leading identifier, used to match against changedMethods
+  // (which carry bare method names). Falls back to the whole string.
+  const methodName = (sig) => {
+    const m = /([A-Za-z_$][\w$]*)\s*\(/.exec(sig);
+    return m ? m[1] : sig.trim();
+  };
+  const isChanged = (sig) => changed.has(sig) || changed.has(methodName(sig));
+
+  const Label = ({ children }) => (
+    <div style={{ font: 'var(--weight-semibold) var(--text-xs)/1 var(--font-ui)',
+      letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase',
+      color: 'var(--text-tertiary)' }}>{children}</div>
+  );
+  const code = { font: 'var(--text-sm)/1.6 var(--font-mono)', color: 'var(--text-secondary)',
+    whiteSpace: 'pre-wrap', wordBreak: 'break-word' };
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '18px var(--gutter-card) 24px',
+      background: 'var(--surface-inset)', display: 'flex', flexDirection: 'column', gap: 18 }}>
+
+      {/* Banner — this is context, not a change. Make that unmistakable. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 12px',
+        borderRadius: 'var(--radius-sm)', background: 'var(--surface-overlay)',
+        border: '1px solid var(--border-subtle)' }}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+          style={{ color: 'var(--text-tertiary)', flex: 'none' }}>
+          <circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" />
+        </svg>
+        <span style={{ font: 'var(--weight-medium) var(--text-xs)/1.3 var(--font-ui)',
+          letterSpacing: 'var(--tracking-wide)', color: 'var(--text-tertiary)' }}>
+          Definition (not a change) — shown for context just before {card.symbol} is first used.
+        </span>
+      </div>
+
+      {/* Role — the AI one-liner, when present. */}
+      {ov.role && (
+        <div style={{ font: 'var(--text-sm)/1.55 var(--font-ui)', color: 'var(--text-primary)',
+          textWrap: 'pretty' }}>{ov.role}</div>
+      )}
+
+      {/* Fields */}
+      {fields.length > 0 && (
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Label>Fields</Label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {fields.map((f, i) => (<div key={i} style={code}>{f}</div>))}
+          </div>
+        </section>
+      )}
+
+      {/* Constructor */}
+      {ov.constructor && (
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Label>Constructor</Label>
+          <div style={code}>{ov.constructor}</div>
+        </section>
+      )}
+
+      {/* Public methods — changed-in-this-PR ones are highlighted with a pill. */}
+      {publicMethods.length > 0 && (
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Label>Public methods</Label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            {publicMethods.map((m, i) => {
+              const changedHere = isChanged(m);
+              return (
+                <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 9,
+                  padding: changedHere ? '2px 8px' : '2px 0',
+                  marginLeft: changedHere ? -8 : 0, borderRadius: 'var(--radius-sm)',
+                  background: changedHere ? 'var(--accent-dim, rgba(110,139,255,0.10))' : 'transparent',
+                  boxShadow: changedHere ? 'inset 2px 0 0 var(--accent)' : 'none' }}>
+                  <span style={{ ...code, color: changedHere ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{m}</span>
+                  {changedHere && (
+                    <span style={{ flex: 'none', font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
+                      letterSpacing: 'var(--tracking-wide)', color: 'var(--accent)' }}>changed here</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Nothing extracted — keep the banner meaningful, say so plainly. */}
+      {!ov.role && fields.length === 0 && !ov.constructor && publicMethods.length === 0 && (
+        <div style={{ font: 'var(--text-sm)/1.5 var(--font-ui)', color: 'var(--text-faint)' }}>
+          No structural details available for {card.symbol}.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ReviewScreen(props) {
   const {
     card, index, total, dir, project, base, target, onChangeProject, unresolved,
@@ -88,10 +193,18 @@ export default function ReviewScreen(props) {
     verdict, flagged, hasPrev, hasNext,
     onPass, onPrev, onNext, onJumpUnresolved,
     threads, onOpenLine, onResolve, onSend,
+    jitDefs,
   } = props;
 
   // Is this a JIT definition card (⑨ fills the overview; ⑧ leaves the branch placeholder)?
   const isDefinition = card.kind === 'definition';
+  // The structured overview for a definition card. The engine ships `jitDefs` (one per
+  // definition pseudo-card) whose `id` equals this card's id; we match on it. Undefined
+  // for non-definition cards (and harmlessly when jitDefs is absent → degrades to nothing).
+  const definition = React.useMemo(
+    () => (isDefinition && jitDefs ? jitDefs.find((d) => d.id === card.id) : null),
+    [isDefinition, jitDefs, card.id],
+  );
 
   // ---- Build aligned split rows (before | after) from the unified line list.
   const rows = React.useMemo(() => {
@@ -546,15 +659,7 @@ export default function ReviewScreen(props) {
             {/* JIT definition (⑨) — an overview panel instead of a diff. ⑧ leaves the
                 placeholder; the engine's DefinitionOverview fills it in ⑨. */}
             {isDefinition ? (
-              <div style={{ flex: 1, overflowY: 'auto', padding: '20px var(--gutter-card)',
-                background: 'var(--surface-inset)', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
-                  letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase',
-                  color: 'var(--text-tertiary)' }}>Definition overview</div>
-                <div style={{ font: 'var(--text-sm)/1.5 var(--font-ui)', color: 'var(--text-faint)' }}>
-                  Overview of {card.symbol} — shown here just before it is first used.
-                </div>
-              </div>
+              <DefinitionPanel card={card} overview={definition && definition.overview} />
             ) : (
             <React.Fragment>
             {/* hidden monospace sizer — measures one char at the current size */}
