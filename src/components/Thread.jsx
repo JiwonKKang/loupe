@@ -150,8 +150,7 @@ export function Thread({
 
       {!resolved && (
         <div style={{ marginTop: 11, paddingTop: 9, borderTop: '1px solid var(--border-subtle)' }}>
-          {/* #model + composer: the model segment sits to the LEFT of the textarea,
-              so the choice (accuracy vs speed) reads before you type. */}
+          {/* #model + composer: the model dropdown sits to the LEFT of the textarea. */}
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
           <ModelMenu model={model} onSetModel={onSetModel} />
           <textarea
@@ -209,40 +208,26 @@ export function Thread({
 }
 
 /**
- * ModelMenu — compact segmented control to the left of the composer. Picks the
- * model that answers THIS thread: Sonnet (정확) or Haiku (빠름). Shows the current
- * choice and calls onSetModel on change. Disabled (read-only display) when no
- * onSetModel is wired. Design-token only; sized to align with the composer top.
+ * ModelMenu — a compact dropdown to the left of the composer that picks which
+ * model answers THIS thread (Sonnet / Haiku). A native <select> so its option
+ * list renders in the OS layer and isn't clipped by the thread's overflow:hidden.
  */
 function ModelMenu({ model = 'sonnet', onSetModel }) {
-  const opts = [
-    { id: 'sonnet', label: 'Sonnet', hint: '정확' },
-    { id: 'haiku', label: 'Haiku', hint: '빠름' },
-  ];
+  const chevron =
+    "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8f99' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>\")";
   return (
-    <div role="group" aria-label="모델 선택" title="이 스레드에 답할 모델"
-      style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: 1,
-        padding: 2, borderRadius: 'var(--radius-pill)',
-        background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)' }}>
-      {opts.map((o) => {
-        const on = model === o.id;
-        return (
-          <button key={o.id} type="button" aria-pressed={on} title={`${o.label} · ${o.hint}`}
-            disabled={!onSetModel}
-            onClick={() => { if (onSetModel && !on) onSetModel(o.id); }}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, height: 18, padding: '0 8px',
-              borderRadius: 'var(--radius-pill)', border: 'none', whiteSpace: 'nowrap',
-              cursor: onSetModel ? (on ? 'default' : 'pointer') : 'default',
-              background: on ? 'var(--accent-dim)' : 'transparent',
-              color: on ? 'var(--accent)' : 'var(--text-tertiary)',
-              font: `var(--weight-medium) 10px/1 var(--font-ui)`,
-              transition: 'var(--t-hover)' }}>
-            {o.label}
-            <span style={{ font: '8px/1 var(--font-ui)',
-              color: on ? 'var(--accent)' : 'var(--text-faint)', opacity: on ? 0.85 : 1 }}>{o.hint}</span>
-          </button>
-        );
-      })}
-    </div>
+    <select aria-label="모델 선택" title="이 스레드에 답할 모델"
+      value={model} disabled={!onSetModel}
+      onChange={(e) => onSetModel && onSetModel(e.target.value)}
+      style={{ flex: 'none', height: 22, padding: '0 23px 0 10px', borderRadius: 'var(--radius-pill)',
+        background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)',
+        color: 'var(--text-secondary)', font: 'var(--weight-medium) 11px/1 var(--font-ui)',
+        cursor: onSetModel ? 'pointer' : 'default', outline: 'none',
+        appearance: 'none', WebkitAppearance: 'none',
+        backgroundImage: chevron, backgroundRepeat: 'no-repeat',
+        backgroundPosition: 'right 7px center' }}>
+      <option value="sonnet">Sonnet</option>
+      <option value="haiku">Haiku</option>
+    </select>
   );
 }
