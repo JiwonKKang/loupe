@@ -96,6 +96,37 @@ const AGENTIC_TIMEOUT: Duration = Duration::from_secs(600);
 /// process only — never logged, never placed on the command line.
 const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
+/// PATH for the spawned `claude` process. A bundled app launched from Finder /
+/// Spotlight / the Dock inherits a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`)
+/// that excludes Homebrew and user tool dirs — so `claude` (commonly at
+/// `/opt/homebrew/bin/claude`) isn't found and every call fails with
+/// "claude CLI not found". (In `tauri dev` it works only because the dev process
+/// inherited the terminal's full PATH.) Merge the inherited PATH with the usual
+/// CLI install locations so the installed app resolves `claude` the same way.
+fn augmented_path() -> String {
+    let mut dirs: Vec<String> = Vec::new();
+    let mut push = |d: String| {
+        if !d.is_empty() && !dirs.iter().any(|x| x == &d) {
+            dirs.push(d);
+        }
+    };
+    if let Ok(p) = std::env::var("PATH") {
+        for d in p.split(':') {
+            push(d.to_string());
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    push("/opt/homebrew/bin".to_string());
+    push("/usr/local/bin".to_string());
+    push(format!("{home}/.local/bin"));
+    push(format!("{home}/.bun/bin"));
+    push(format!("{home}/.npm-global/bin"));
+    push(format!("{home}/.claude/local"));
+    push("/usr/bin".to_string());
+    push("/bin".to_string());
+    dirs.join(":")
+}
+
 /// CLI model alias for a tier. The CLI accepts bare aliases (`sonnet` / `haiku`) and
 /// resolves them to the latest concrete model — Quality ⇒ Sonnet (the whole point of
 /// this provider), Fast ⇒ Haiku.
@@ -364,6 +395,8 @@ pub async fn ask_agentic(
             .current_dir(&repo_path)
             // Setup-token via env only — never on argv, never logged.
             .env(TOKEN_ENV, token)
+            // Resolve `claude` even when launched from Finder (minimal GUI PATH).
+            .env("PATH", augmented_path())
             .output()
     });
 
@@ -423,6 +456,8 @@ impl LlmProvider for CliProvider {
                 .current_dir(std::env::temp_dir())
                 // Setup-token via env only — never on argv, never logged.
                 .env(TOKEN_ENV, token)
+                // Resolve `claude` even when launched from Finder (minimal GUI PATH).
+                .env("PATH", augmented_path())
                 .output()
         })
         .await
