@@ -107,7 +107,7 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
     >
       <div ref={scrollRef} style={{
         flex: 1, overflowY: 'auto', overflowX: 'hidden',
-        padding: expanded ? '28px 20px' : '28px 0',
+        padding: expanded ? '54px 20px' : '54px 0',
         display: 'flex', flexDirection: 'column',
         alignItems: expanded ? 'stretch' : 'center',
         gap: expanded ? 22 : 0,

@@ -804,6 +804,11 @@ export default function ReviewScreen(props) {
       style={{ position: 'absolute', inset: 0, display: 'flex',
         background: 'var(--bg-base)', overflow: 'hidden' }}>
 
+      {/* Top-left project / branch menu — anchored to the SCREEN root (not the stage)
+          so its x matches the summary / pick-project screens (which have no spine
+          rail offsetting it). Same distance from the traffic lights everywhere. */}
+      <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} />
+
       {/* Queue spine — dim until hovered */}
       <ProgressSpine items={spineItems} activeId={card.id} onSelect={onSelect} />
 
@@ -811,13 +816,11 @@ export default function ReviewScreen(props) {
       <div style={{ flex: 1, position: 'relative', display: 'flex',
         flexDirection: 'column', minWidth: 0 }}>
 
-        {/* Top-left project / branch menu — switch projects anytime */}
-        <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} />
-
         {/* Top bar — the cluster you're reviewing (prominent) + a subtle progress count.
-            The cluster title is the orienting label, so it reads clearly (not dimmed). */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
-          gap: 10, padding: '24px 0 0' }}>
+            The cluster title is the orienting label, so it reads clearly (not dimmed).
+            Doubles as the window's drag handle (overlay title bar has no chrome). */}
+        <div data-tauri-drag-region style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
+          gap: 10, padding: '34px 0 6px' }}>
           <span style={{ color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums',
             font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
             letterSpacing: 'var(--tracking-wide)', opacity: 'var(--dim-rest)' }}>

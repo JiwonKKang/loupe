@@ -41,6 +41,7 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
   const [open, setOpen] = React.useState(false);
   const [rect, setRect] = React.useState(null);
   const [query, setQuery] = React.useState('');
+  const [hi, setHi] = React.useState(0); // keyboard-highlighted option index
   const trigRef = React.useRef(null);
   const popRef = React.useRef(null);
   const searchRef = React.useRef(null);
@@ -54,11 +55,17 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
   }, [open]);
-  // Focus the search box when the popover opens so you can type to filter at once.
-  React.useEffect(() => { if (open && searchRef.current) searchRef.current.focus(); }, [open]);
+  // On open, focus the search box (to type/filter) or the popover itself (no search)
+  // so arrow-key navigation works either way.
+  React.useEffect(() => {
+    if (!open) return;
+    const el = searchRef.current || popRef.current;
+    if (el) el.focus();
+  }, [open]);
   const toggle = () => {
     if (!open && trigRef.current) setRect(trigRef.current.getBoundingClientRect());
     setQuery('');
+    setHi(0);
     setOpen((v) => !v);
   };
   // Live substring filter (case-insensitive). Show the search box only once the
@@ -67,6 +74,16 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
   const filtered = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
   const showSearch = options.length > 6;
   const pick = (o) => { onChange(o); setOpen(false); };
+  // Clamp the highlight to the current list; ↑/↓ move it, Enter selects it, and
+  // Tab snaps to the lone remaining match.
+  const hiC = Math.min(hi, Math.max(0, filtered.length - 1));
+  const onListKey = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); setOpen(false); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); setHi(Math.min(filtered.length - 1, hiC + 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(Math.max(0, hiC - 1)); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (filtered[hiC]) pick(filtered[hiC]); }
+    else if (e.key === 'Tab' && filtered.length === 1) { e.preventDefault(); pick(filtered[0]); }
+  };
   return (
     <React.Fragment>
       <button ref={trigRef} onClick={toggle} type="button"
@@ -79,17 +96,14 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
             transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-soft)' }}><path d="M6 9l6 6 6-6" /></svg>
       </button>
       {open && rect && (
-        <div ref={popRef} style={{ position: 'fixed', top: rect.bottom + 5, left: rect.left,
+        <div ref={popRef} tabIndex={-1} onKeyDown={onListKey} style={{ position: 'fixed', top: rect.bottom + 5, left: rect.left,
           minWidth: rect.width, maxWidth: 260, zIndex: 60, background: 'var(--surface-overlay)',
           border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
-          boxShadow: 'var(--shadow-pop)', padding: 4, display: 'flex', flexDirection: 'column' }}>
+          boxShadow: 'var(--shadow-pop)', padding: 4, display: 'flex', flexDirection: 'column', outline: 'none' }}>
           {showSearch && (
             <input ref={searchRef} value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') { e.preventDefault(); setOpen(false); }
-                else if (e.key === 'Enter' && filtered.length) { e.preventDefault(); pick(filtered[0]); }
-              }}
+              onChange={(e) => { setQuery(e.target.value); setHi(0); }}
+              onKeyDown={onListKey}
               placeholder="브랜치 검색…" spellCheck={false}
               style={{ width: '100%', boxSizing: 'border-box', height: 28, padding: '0 8px', marginBottom: 4,
                 borderRadius: 'var(--radius-sm)', background: 'var(--surface-inset)',
@@ -103,17 +117,19 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
               <div style={{ padding: '8px', font: '12px/1.3 var(--font-ui)', color: 'var(--text-faint)' }}>
                 일치하는 브랜치 없음
               </div>
-            ) : filtered.map((o) => {
+            ) : filtered.map((o, i) => {
               const sel = o === value;
+              const active = i === hiC; // keyboard-highlighted row
               return (
                 <button key={o} type="button" onClick={() => pick(o)}
+                  ref={active ? (el) => el && el.scrollIntoView({ block: 'nearest' }) : undefined}
+                  onMouseEnter={() => setHi(i)}
                   style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 8px',
                     borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left', border: 'none',
-                    whiteSpace: 'nowrap', background: sel ? 'var(--accent-dim)' : 'transparent',
-                    color: sel ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    font: '12px/1 var(--font-mono)', transition: 'background var(--dur-fast) var(--ease-soft)' }}
-                  onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = 'var(--surface-inset)'; }}
-                  onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = 'transparent'; }}>
+                    whiteSpace: 'nowrap',
+                    background: sel ? 'var(--accent-dim)' : (active ? 'var(--surface-inset)' : 'transparent'),
+                    color: sel || active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    font: '12px/1 var(--font-mono)', transition: 'background var(--dur-fast) var(--ease-soft)' }}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8"
                     strokeLinecap="round" strokeLinejoin="round" style={{ color: sel ? 'var(--accent)' : 'transparent', flex: 'none' }}><path d="M20 6 9 17l-5-5" /></svg>
                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{highlightMatch(o, q)}</span>
@@ -292,7 +308,7 @@ export default function ProjectMenu({
   const optsFor = (value) => (branches.length > 0 ? branches : (value ? [value] : []));
 
   return (
-    <div ref={ref} style={{ position: 'absolute', top: 20, left: 24, zIndex: 40,
+    <div ref={ref} style={{ position: 'absolute', top: 13, left: 102, zIndex: 40,
       // Size to the trigger so the bar grows with the folder name (open OR closed).
       // Open keeps a 296 floor for the panel. Capped so the bar never reaches the
       // centered "02 / 08 · cluster" title (≈ stage center).

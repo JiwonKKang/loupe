@@ -58,7 +58,7 @@ export default function Onboarding(props) {
   };
 
   return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+    <div data-tauri-drag-region style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
       alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)', padding: 24 }}>
 
       {/* wordmark */}

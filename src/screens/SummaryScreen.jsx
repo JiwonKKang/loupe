@@ -48,7 +48,7 @@ export default function SummaryScreen(props) {
   ].join('\n');
 
   return (
-    <div style={{ position: 'absolute', inset: 0, background: 'var(--bg-base)' }}>
+    <div data-tauri-drag-region style={{ position: 'absolute', inset: 0, background: 'var(--bg-base)' }}>
       {/* top-left project / branch menu — same as the review screen, so you can
          switch projects or re-run from the complete screen too. Pinned (outside the
          scroll area) so it stays put even when the summary is long. */}

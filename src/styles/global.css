@@ -104,12 +104,10 @@ body { font-family: var(--font-ui); color: var(--text-primary);
 /* Code lines in the split diff clip (overflow:hidden) and translate by a CSS
    variable; a per-side .loupe-hbar at the bottom of the diff is the only
    horizontal control and its scrollLeft drives that variable. */
-.loupe-hbar { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
-.loupe-hbar::-webkit-scrollbar { height: 8px; }
-.loupe-hbar::-webkit-scrollbar-track { background: transparent; }
-.loupe-hbar::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
-  border: 2px solid transparent; background-clip: padding-box; }
-.loupe-hbar:hover::-webkit-scrollbar-thumb { background: var(--border-strong); background-clip: padding-box; }
+/* The horizontal diff scroll is driven by the wheel (and writes the CSS var) — the
+   scrollbar itself is hidden so it never clutters the card. */
+.loupe-hbar { scrollbar-width: none; }
+.loupe-hbar::-webkit-scrollbar { display: none; height: 0; }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 999px;
   border: 2px solid transparent; background-clip: padding-box; }

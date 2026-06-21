@@ -77,7 +77,7 @@ export default function Settings({ connected = false, onBack, onSaved, onCleared
   };
 
   return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+    <div data-tauri-drag-region style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
       alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)', padding: 24 }}>
 
       <div style={{ marginBottom: 38 }}>

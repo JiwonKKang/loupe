@@ -718,7 +718,7 @@ export default function App() {
   if (screen === 'pickProject') {
     return (
       <React.Fragment>
-        <div style={{ position: 'absolute', inset: 0, background: 'var(--bg-base)', overflow: 'hidden' }}>
+        <div data-tauri-drag-region style={{ position: 'absolute', inset: 0, background: 'var(--bg-base)', overflow: 'hidden' }}>
           <ProjectMenu
             project={repoPath} base={base} target={target}
             branches={undefined} recents={undefined}
