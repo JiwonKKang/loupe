@@ -1,0 +1,40 @@
+#!/bin/sh
+# loupe — open a code review in the Loupe app from the terminal / a skill.
+#
+#   loupe [path] [base] [target]
+#     path    git repo (or any dir inside one); default: current directory
+#     base    base branch;   default: first of main/master/develop, else target
+#     target  compare branch; default: current branch (HEAD)
+#
+# It resolves the range, then opens loupe://review?… which launches (or focuses)
+# the app and starts the analysis. The project also lands in the app's recents.
+set -eu
+
+dir="${1:-.}"
+repo=$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "loupe: not a git repository: $dir" >&2
+  exit 1
+}
+
+base="${2:-}"
+if [ -z "$base" ]; then
+  for b in main master develop; do
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then base="$b"; break; fi
+  done
+fi
+
+target="${3:-}"
+[ -z "$target" ] && target=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+[ -z "$base" ] && base="$target"
+
+if [ -z "$base" ] || [ -z "$target" ]; then
+  echo "loupe: could not resolve base/target — pass them: loupe <path> <base> <target>" >&2
+  exit 1
+fi
+
+# URL-encode (perl is always present on macOS; ASCII-correct).
+enc() { printf %s "$1" | perl -pe 's/([^A-Za-z0-9._~-])/sprintf("%%%02X",ord($1))/ge'; }
+
+url="loupe://review?repoPath=$(enc "$repo")&base=$(enc "$base")&target=$(enc "$target")"
+open "$url"
+echo "loupe: $repo  ($base → $target)"

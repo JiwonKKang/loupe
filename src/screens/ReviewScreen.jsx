@@ -14,6 +14,15 @@ import { highlightGo } from '../data/fixtures';
 // Memoize syntax highlighting per source string: the same line text re-tokenizes
 // to the same keyed span array, so windowing (mount/unmount as you scroll) never
 // pays to re-highlight a line it has already seen. Bounded to avoid unbounded growth.
+// Collapse a long file path to its first `head` + last `tail` segments with an
+// ellipsis between (e.g. src/main/…/bus/BusRouteInfoClients.kt) so the card header
+// never wraps or clips the path. The filename (last segment) is always kept.
+function middlePath(p, head = 2, tail = 2) {
+  const parts = String(p || '').split('/').filter(Boolean);
+  if (parts.length <= head + tail + 1) return p;
+  return [...parts.slice(0, head), '…', ...parts.slice(-tail)].join('/');
+}
+
 const _hlCache = new Map();
 function hl(s) {
   if (_hlCache.has(s)) return _hlCache.get(s);
@@ -186,7 +195,9 @@ export default function ReviewScreen(props) {
   // a thin "⋯ N unchanged lines" divider the reviewer can expand. Font stays
   // large; only the changes (the point of the card) compete for the eye.
   const [expanded, setExpanded] = React.useState(() => new Set());
-  React.useEffect(() => { setExpanded(new Set()); }, [card.id]);
+  // Header path starts collapsed (first/last segments) on every card; click expands.
+  const [pathFull, setPathFull] = React.useState(false);
+  React.useEffect(() => { setExpanded(new Set()); setPathFull(false); }, [card.id]);
   const CONTEXT = 2;
   const display = React.useMemo(() => {
     const items = []; const N = rows.length; let i = 0;
@@ -729,8 +740,12 @@ export default function ReviewScreen(props) {
                     border: '1px solid var(--pass-line)', color: 'var(--pass)',
                     font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)' }}>
                     <Ico d={check} w={13} />Passed</span>)}
-                <span style={{ marginLeft: 'auto', font: 'var(--text-sm)/1 var(--font-mono)',
-                  color: 'var(--text-tertiary)' }}>{card.path}</span>
+                <span onClick={() => setPathFull((v) => !v)} title={pathFull ? '경로 접기' : card.path}
+                  style={{ marginLeft: 'auto', flex: 'none', maxWidth: '55%', cursor: 'pointer',
+                    font: 'var(--text-sm)/1 var(--font-mono)', color: 'var(--text-tertiary)',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    direction: 'rtl', textAlign: 'right' }}>
+                  {pathFull ? card.path : middlePath(card.path)}</span>
               </div>
               <div style={{ font: 'var(--text-sm)/var(--leading-normal) var(--font-ui)',
                 color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.aiSummary || card.summary}</div>

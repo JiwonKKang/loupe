@@ -13,6 +13,7 @@
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { onOpenUrl, getCurrent as getCurrentDeepLink } from '@tauri-apps/plugin-deep-link';
 import Onboarding from './screens/Onboarding';
 import Settings from './screens/Settings';
 import ReviewScreen from './screens/ReviewScreen';
@@ -261,6 +262,47 @@ export default function App() {
     setScreen('review');
     load({ repoPath: rp, base: b, target: t });
   }, [load]);
+
+  // ---- `loupe://review?repoPath=&base=&target=` deep links (the `loupe` CLI) ----
+  // The CLI opens this URL; the OS routes it here (launching or focusing the app).
+  // We stash the parsed range and apply it once a token exists.
+  const [pendingCli, setPendingCli] = React.useState(null);
+  const handleDeepLink = React.useCallback((urls) => {
+    const raw = Array.isArray(urls) ? urls.find(Boolean) : urls;
+    if (!raw) return;
+    try {
+      const u = new URL(raw);
+      const action = (u.host || u.pathname.replace(/\//g, '')) || '';
+      if (action !== 'review') return;
+      const repoPath = u.searchParams.get('repoPath');
+      const base = u.searchParams.get('base');
+      const target = u.searchParams.get('target');
+      if (repoPath && base && target) setPendingCli({ repoPath, base, target });
+    } catch { /* malformed URL — ignore */ }
+  }, []);
+  React.useEffect(() => {
+    let un;
+    onOpenUrl((urls) => handleDeepLink(urls)).then((u) => { un = u; }).catch(() => {});
+    // cold start: the app may have been launched BY the url.
+    getCurrentDeepLink().then((urls) => { if (urls && urls.length) handleDeepLink(urls); }).catch(() => {});
+    return () => { if (un) un(); };
+  }, [handleDeepLink]);
+  // Apply a pending CLI review once a token is available; without one, send the
+  // user to onboarding (the pending review survives until the token is set).
+  React.useEffect(() => {
+    if (!pendingCli) return;
+    if (!token) { setScreen('onboarding'); return; }
+    const { repoPath: rp, base: b, target: t } = pendingCli;
+    // record in recents (same shape the ProjectMenu uses) so it shows in the menu.
+    try {
+      const raw = window.localStorage.getItem('loupe.recents');
+      const arr = raw ? JSON.parse(raw) : [];
+      const next = [rp, ...(Array.isArray(arr) ? arr : []).filter((r) => r !== rp)].slice(0, 4);
+      window.localStorage.setItem('loupe.recents', JSON.stringify(next));
+    } catch { /* storage unavailable — non-fatal */ }
+    setPendingCli(null);
+    changeProject({ repoPath: rp, base: b, target: t });
+  }, [pendingCli, token, changeProject]);
 
   // Onboarding finished → persist the token, then go pick a project. A save
   // failure keeps the user on onboarding with the error surfaced.
