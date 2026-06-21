@@ -129,7 +129,7 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
 
 export default function ProjectMenu({
   project, base, target, branches: branchesProp, recents: recentsProp,
-  onChangeProject, onBrowse, defaultOpen = false, pinned = false,
+  onChangeProject, onBrowse, defaultOpen = false, pinned = false, prominent = false,
 }) {
   // `pinned` (used by App's pickProject shell, where there is no project yet):
   // the menu must stay open — outside-click never closes it and the trigger
@@ -304,10 +304,10 @@ export default function ProjectMenu({
       <div
         onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
         style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden',
-          border: `1px solid ${open_ ? 'var(--border-default)' : 'transparent'}`,
-          background: open_ ? 'var(--surface-overlay)' : (hover ? 'var(--surface-overlay)' : 'transparent'),
+          border: `1px solid ${open_ ? 'var(--border-default)' : (prominent ? 'var(--border-subtle)' : 'transparent')}`,
+          background: open_ || hover ? 'var(--surface-overlay)' : (prominent ? 'var(--surface-overlay)' : 'transparent'),
           boxShadow: open_ ? 'var(--shadow-pop)' : 'none',
-          opacity: open_ || hover ? 1 : 'var(--dim-rest)',
+          opacity: prominent || open_ || hover ? 1 : 'var(--dim-rest)',
           transition: 'background var(--dur-fast) var(--ease-soft), border-color var(--dur-fast) var(--ease-soft), box-shadow var(--dur-base) var(--ease-soft), opacity var(--dur-fast) var(--ease-soft)' }}>
 
         {/* trigger row */}

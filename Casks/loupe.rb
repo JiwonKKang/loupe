@@ -1,5 +1,5 @@
 cask "loupe" do
-  version "0.1.5"
+  version "0.1.6"
   sha256 :no_check # ad-hoc / self-hosted release; swap for a real digest per version if you prefer
 
   url "https://github.com/JiwonKKang/loupe/releases/download/v#{version}/Loupe_#{version}_universal.dmg",

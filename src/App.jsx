@@ -807,6 +807,7 @@ export default function App() {
       )}
       {screen === 'summary' && (
         <SummaryScreen cards={list} verdicts={verdicts} threads={threads}
+          project={repoPath} base={base} target={target} onChangeProject={changeProject}
           onRestart={() => { setIndex(0); setDir(1); setScreen('review'); }} />
       )}
 

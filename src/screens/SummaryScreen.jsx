@@ -5,9 +5,10 @@ import React from 'react';
 import { Button } from '../components/Button';
 import { Badge } from '../components/Badge';
 import { KeyHint } from '../components/KeyHint';
+import ProjectMenu from '../components/ProjectMenu';
 
 export default function SummaryScreen(props) {
-  const { cards, verdicts, threads, onRestart } = props;
+  const { cards, verdicts, threads, onRestart, project, base, target, onChangeProject } = props;
   const [copied, setCopied] = React.useState(false);
 
   const passed = cards.filter((c) => verdicts[c.id] === 'pass').length;
@@ -47,8 +48,15 @@ export default function SummaryScreen(props) {
   ].join('\n');
 
   return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', justifyContent: 'center',
-      alignItems: 'flex-start', overflowY: 'auto', background: 'var(--bg-base)', padding: '72px 24px' }}>
+    <div style={{ position: 'absolute', inset: 0, background: 'var(--bg-base)' }}>
+      {/* top-left project / branch menu — same as the review screen, so you can
+         switch projects or re-run from the complete screen too. Pinned (outside the
+         scroll area) so it stays put even when the summary is long. */}
+      {onChangeProject && (
+        <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} prominent />
+      )}
+      <div style={{ position: 'absolute', inset: 0, display: 'flex', justifyContent: 'center',
+        alignItems: 'flex-start', overflowY: 'auto', padding: '72px 24px' }}>
       <div style={{ width: 600, maxWidth: '100%' }}>
 
         <div style={{ font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
@@ -120,6 +128,7 @@ export default function SummaryScreen(props) {
             <KeyHint keys="⌘⏎" label="submit review" size="sm" />
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
