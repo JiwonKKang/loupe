@@ -276,11 +276,14 @@ export default function ReviewScreen(props) {
   // whose badge is hovered). We faintly tint exactly those rows so the reviewer
   // sees what the thread is about. A Set (not a single lo..hi span) so two disjoint
   // threads don't bleed a highlight across the gap between them.
+  // Side-keyed (`old:row` / `new:row`) so the tint lands ONLY on the thread's own
+  // side (before OR after), matching how the drag selection is one-sided.
   const openRegionRows = React.useMemo(() => {
     const s = new Set();
     threads.forEach((t) => {
       if ((t.open || t.id === hoverThreadId) && t.from != null && t.to != null) {
-        for (let k = t.from; k <= t.to; k++) s.add(k);
+        const sd = t.side || 'old';
+        for (let k = t.from; k <= t.to; k++) s.add(sd + ':' + k);
       }
     });
     return s;
@@ -976,9 +979,12 @@ export default function ReviewScreen(props) {
                 // #3 persistent region tint (suppressed while actively dragging so
                 // the live selection reads cleanly). regFirst/regLast draw the box's
                 // top/bottom edge even across disjoint regions.
-                const region = !dragging && openRegionRows.has(r);
-                const regFirst = region && !openRegionRows.has(r - 1);
-                const regLast = region && !openRegionRows.has(r + 1);
+                const regionOld = !dragging && openRegionRows.has('old:' + r);
+                const regionNew = !dragging && openRegionRows.has('new:' + r);
+                const regFirstOld = regionOld && !openRegionRows.has('old:' + (r - 1));
+                const regLastOld = regionOld && !openRegionRows.has('old:' + (r + 1));
+                const regFirstNew = regionNew && !openRegionRows.has('new:' + (r - 1));
+                const regLastNew = regionNew && !openRegionRows.has('new:' + (r + 1));
                 // New-file line for ⌘-click → open-in-editor (after side; deletion → before).
                 const navLine = (row.right && row.right.n) || (row.left && row.left.n);
                 // A row's measured height must include any open/collapsed thread that
@@ -989,12 +995,12 @@ export default function ReviewScreen(props) {
                   <div key={r} ref={measure(gi)}>
                     <div data-line={r} style={{ display: 'flex', minWidth: 0 }}>
                       <Half cell={row.left} kind={row.kind} side="old" r={r}
-                        active={active} isFirst={isFirst} isLast={isLast} thread={thread}
-                        region={region} regFirst={regFirst} regLast={regLast} navLine={navLine}
+                        active={active && dragSide === 'old'} isFirst={isFirst && dragSide === 'old'} isLast={isLast && dragSide === 'old'} thread={thread}
+                        region={regionOld} regFirst={regFirstOld} regLast={regLastOld} navLine={navLine}
                         flash={!!(flashRow && flashRow.r === r && flashRow.side === 'old')} />
                       <Half cell={row.right} kind={row.kind} side="new" r={r}
-                        active={active} isFirst={isFirst} isLast={isLast} thread={thread}
-                        region={region} regFirst={regFirst} regLast={regLast} navLine={navLine}
+                        active={active && dragSide === 'new'} isFirst={isFirst && dragSide === 'new'} isLast={isLast && dragSide === 'new'} thread={thread}
+                        region={regionNew} regFirst={regFirstNew} regLast={regLastNew} navLine={navLine}
                         flash={!!(flashRow && flashRow.r === r && flashRow.side === 'new')} />
                     </div>
                     {thread && thread.open && (
