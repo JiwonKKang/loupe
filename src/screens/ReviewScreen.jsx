@@ -87,7 +87,7 @@ export default function ReviewScreen(props) {
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
     onPass, onPrev, onNext, onJumpUnresolved,
-    threads, onOpenLine, onResolve, onSend, onSetThreadModel,
+    threads, onOpenLine, onResolve, onSend, onSetThreadModel, onDeleteThread, onNavigateCard,
     // #8/#9 shared contract — set of threadId with an arrived AI reply that has
     // not yet been read (read = expanding that thread). App owns the set; when it
     // doesn't pass one yet, default to an empty Set so `.has(...)` stays safe.
@@ -143,8 +143,21 @@ export default function ReviewScreen(props) {
     // Anchor the thread (and its collapsed badge) on the row where the drag
     // ENDED, not where it began.
     const side = dragSide, f = dragTo != null ? dragTo : dragFrom;
+    const from = Math.min(dragFrom, dragTo), to = Math.max(dragFrom, dragTo);
+    // Capture the literal code the user dragged over, so the thread prompt can
+    // anchor a vague "이거 / this" to the EXACT selected region (not a row index).
+    // Change rows render as -old / +new; context rows as a plain (unchanged) line.
+    const text = rows.slice(from, to + 1).map((row) => {
+      if (row.kind === 'ctx') return '  ' + ((row.right && row.right.c) || (row.left && row.left.c) || '');
+      const parts = [];
+      if (row.left && row.left.c != null) parts.push('- ' + row.left.c);
+      if (row.right && row.right.c != null) parts.push('+ ' + row.right.c);
+      return parts.join('\n');
+    }).join('\n');
     setDragSide(null); setDragFrom(null); setDragTo(null);
-    onOpenLine(side, f);
+    // Pass the dragged ROW range + selected text so the thread remembers its
+    // region (#3) and the AI prompt can quote exactly what was selected.
+    onOpenLine(side, f, { from, to, text });
   };
 
   // thread lookup keyed by row
@@ -152,6 +165,20 @@ export default function ReviewScreen(props) {
     const m = {};
     threads.forEach((t) => { m[t.lineN] = t; });
     return m;
+  }, [threads]);
+
+  // #3 — rows covered by an OPEN thread's dragged region. While such a thread is
+  // expanded we faintly tint exactly those rows so the reviewer sees what the
+  // question is about. A Set (not a single lo..hi span) so two disjoint open
+  // threads don't bleed a highlight across the gap between them.
+  const openRegionRows = React.useMemo(() => {
+    const s = new Set();
+    threads.forEach((t) => {
+      if (t.open && t.from != null && t.to != null) {
+        for (let k = t.from; k <= t.to; k++) s.add(k);
+      }
+    });
+    return s;
   }, [threads]);
 
   // ---- Fold unchanged context so big functions fit at a glance ----
@@ -203,11 +230,33 @@ export default function ReviewScreen(props) {
   // Lines no longer wrap; the diff scrolls left/right. To keep both columns
   // equal (centered divider) we give each side a min-width that fits the
   // longest line, measured in real monospace px for the current font size.
+  // Rendered column width of a line — NOT .length. A CJK/full-width glyph (e.g.
+  // Korean in comments) occupies ~2 monospace cells but counts as 1 char, and a
+  // tab advances up to tabSize(2). Using .length under-measured these, so the
+  // h-scroll spacer was too short and you couldn't scroll to the end of a line
+  // with Korean text or tabs. Count them at their real cell width.
+  const cellWidth = (s) => {
+    let w = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c === 9) { w += 2; continue; } // tab
+      w += (c >= 0x1100 && (
+        c <= 0x115f ||                     // Hangul Jamo
+        (c >= 0x2e80 && c <= 0xa4cf) ||    // CJK radicals … Yi
+        (c >= 0xac00 && c <= 0xd7a3) ||    // Hangul syllables
+        (c >= 0xf900 && c <= 0xfaff) ||    // CJK compatibility
+        (c >= 0xfe30 && c <= 0xfe4f) ||    // CJK compat forms
+        (c >= 0xff00 && c <= 0xff60) ||    // full-width forms
+        (c >= 0xffe0 && c <= 0xffe6)
+      )) ? 2 : 1;
+    }
+    return w;
+  };
   const maxChars = React.useMemo(() => {
     let m = 0;
     rows.forEach((r) => {
-      if (r.left && r.left.c) m = Math.max(m, r.left.c.length);
-      if (r.right && r.right.c) m = Math.max(m, r.right.c.length);
+      if (r.left && r.left.c) m = Math.max(m, cellWidth(r.left.c));
+      if (r.right && r.right.c) m = Math.max(m, cellWidth(r.right.c));
     });
     return Math.max(m, 24);
   }, [card.id]);
@@ -216,15 +265,21 @@ export default function ReviewScreen(props) {
   React.useLayoutEffect(() => {
     if (charRef.current) setChPx(charRef.current.getBoundingClientRect().width / 50);
   }, [codeFs]);
-  const GUTTER = 73; // line-number gutter + sign + code padding
+  const GUTTER = 52; // hbar left spacer = Half grid fixed cols (10+30+12), so the
+                     // scroll track mirrors the code column 1:1 (no phantom / no clip)
   // Each side's code area is its OWN horizontal scroller; short lines get a
   // min-width so every line on a side scrolls by the same amount, and a
   // capture-scroll handler keeps all lines of one side in lock-step (so the
   // BEFORE column and the AFTER column scroll independently of each other).
+  // Span width (border-box, so padding is INCLUDED): text width + L/R padding +
+  // a few px slack to absorb sub-pixel chPx error. The h-bar scroller uses this
+  // SAME width and a gutter equal to the grid's fixed columns, so the scrollbar
+  // mirrors the span exactly — it scrolls iff the span overflows the code column,
+  // by exactly the overflow (no phantom scroll, no un-scrollable clipped tail).
   const codeContentW = Math.ceil(maxChars * chPx + 28);
   // Responsive card width: grows with the actual code length up to a max, so
   // short changes get a compact card and long ones widen toward the cap.
-  const cardW = Math.max(760, Math.min(1340, (62 + codeContentW) * 2 + 6));
+  const cardW = Math.max(760, Math.min(1440, (52 + codeContentW) * 2 + 6));
   const diffRef = React.useRef(null);
   // The two bottom horizontal scrollbars (one per side) are the ONLY horizontal
   // controls. Their onScroll writes a CSS variable (--hs-old / --hs-new) on the
@@ -408,14 +463,27 @@ export default function ReviewScreen(props) {
   // the id here and keep re-correcting on every subsequent commit (incl. the
   // measureTick re-renders) until the position is stable, then clear the latch.
   const pendingReveal = React.useRef(null);
+  const prevThreadsRef = React.useRef(threads);
   React.useLayoutEffect(() => {
     const openIds = new Set(threads.filter((t) => t.open).map((t) => t.id));
     // Find an id that is open now but was NOT open on the previous render.
     let justOpened = null;
     openIds.forEach((id) => { if (!prevOpenIds.current.has(id)) justOpened = id; });
+    // Did the threads array itself change (a message sent / AI reply landed),
+    // vs. this effect re-running only because of a measureTick re-layout?
+    const threadsChanged = prevThreadsRef.current !== threads;
+    prevThreadsRef.current = threads;
     prevOpenIds.current = openIds;
-    // Latch a freshly-opened thread; otherwise keep settling the latched one.
-    if (justOpened) pendingReveal.current = justOpened;
+    if (justOpened) {
+      // Latch a freshly-opened thread to scroll its top clear of the header.
+      pendingReveal.current = justOpened;
+    } else if (threadsChanged) {
+      // Content changed in an already-open thread (you typed a follow-up, or the
+      // AI replied) — do NOT re-scroll. Re-revealing here is what yanked the view
+      // back to the top mid-conversation. Drop the latch and leave scroll alone.
+      pendingReveal.current = null;
+    }
+    // (A measureTick-only re-run keeps the latch so the open-reveal can settle.)
     const target = pendingReveal.current;
     if (!target) return;
     // If the latched thread is no longer open (collapsed/resolved), drop it.
@@ -494,15 +562,16 @@ export default function ReviewScreen(props) {
 
   // one side (old/new) of a split row. Selection highlight is row-wide; the
   // + affordance and a collapsed thread's badge are per-side (this column).
-  const Half = ({ cell, kind, side, r, active, isFirst, isLast, thread }) => {
+  const Half = ({ cell, kind, side, r, active, isFirst, isLast, thread, region, regFirst, regLast }) => {
     const isChange = kind === 'change';
     const tone = side === 'old' ? 'del' : 'add';
     const filled = !!cell;
     const showPlus = filled && !thread && ((!dragging && hover && hover.side === side && hover.r === r)
       || (dragging && dragSide === side && dragTo === r));
     const bg = active ? 'rgba(110, 139, 255, 0.20)'
-      : (isChange && filled ? `var(--diff-${tone}-bg)`
-        : (isChange && !filled ? 'rgba(255,255,255,0.014)' : 'transparent'));
+      : (region ? 'rgba(110, 139, 255, 0.09)'
+        : (isChange && filled ? `var(--diff-${tone}-bg)`
+          : (isChange && !filled ? 'rgba(255,255,255,0.014)' : 'transparent')));
     const edge = active ? 'var(--accent-line)' : (isChange && filled ? `var(--diff-${tone}-edge)` : 'transparent');
     let boxShadow;
     if (active) {
@@ -511,6 +580,14 @@ export default function ReviewScreen(props) {
       else parts.push('inset -0.5px 0 0 var(--accent)');
       if (isFirst) parts.push('inset 0 0.5px 0 var(--accent)');
       if (isLast) parts.push('inset 0 -0.5px 0 var(--accent)');
+      boxShadow = parts.join(', ');
+    } else if (region) {
+      // Faint accent frame echoing the live-drag box, one notch dimmer.
+      const parts = [];
+      if (side === 'old') parts.push('inset 0.5px 0 0 var(--accent-line)');
+      else parts.push('inset -0.5px 0 0 var(--accent-line)');
+      if (regFirst) parts.push('inset 0 0.5px 0 var(--accent-line)');
+      if (regLast) parts.push('inset 0 -0.5px 0 var(--accent-line)');
       boxShadow = parts.join(', ');
     } else {
       boxShadow = edge !== 'transparent' ? `inset 3px 0 0 ${edge}` : 'none';
@@ -522,7 +599,7 @@ export default function ReviewScreen(props) {
       onMouseDown: (e) => { if (!thread) { e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); } },
     } : {};
     return (
-      <div {...handlers} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '20px 30px 12px 1fr',
+      <div {...handlers} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '10px 30px 12px 1fr',
         alignItems: 'start', background: bg, cursor: 'default',
         boxShadow, flex: '1 1 0', minWidth: 0,
         borderLeft: side === 'new' ? '1px solid var(--border-subtle)' : 'none',
@@ -543,15 +620,15 @@ export default function ReviewScreen(props) {
           </button>
         )}
         <span></span>
-        <span style={{ textAlign: 'right', paddingRight: 8, color: 'var(--text-faint)',
+        <span style={{ textAlign: 'right', paddingRight: 5, color: 'var(--text-faint)',
           font: codeFs + 'px/var(--leading-code) var(--font-mono)', userSelect: 'none' }}>{cell ? cell.n : ''}</span>
         <span style={{ color: side === 'old' ? 'var(--diff-del-edge)' : 'var(--diff-add-edge)',
           userSelect: 'none', fontWeight: 600, font: codeFs + 'px/var(--leading-code) var(--font-mono)',
           boxShadow: 'inset -1px 0 0 var(--border-subtle)' }}>{sign}</span>
         <div data-side={side} style={{ overflow: 'hidden', minWidth: 0,
           font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
-          <span style={{ display: 'inline-block', minWidth: codeContentW, whiteSpace: 'pre',
-            paddingLeft: 11, paddingRight: 16, tabSize: 2,
+          <span style={{ display: 'inline-block', boxSizing: 'border-box', minWidth: codeContentW, whiteSpace: 'pre',
+            paddingLeft: 8, paddingRight: 16, tabSize: 2,
             transform: 'translateX(calc(var(--hs-' + side + ') * -1))' }}>
             {cell ? hl(cell.c) : ''}
           </span>
@@ -673,10 +750,10 @@ export default function ReviewScreen(props) {
               <div ref={headerRef} style={{ display: 'flex', position: 'sticky', top: 0, zIndex: 2,
                 background: 'var(--surface-inset)',
                 borderBottom: '1px solid var(--border-subtle)' }}>
-                <div style={{ flex: '1 1 0', minWidth: 0, padding: '7px 0 7px 73px',
+                <div style={{ flex: '1 1 0', minWidth: 0, padding: '7px 0 7px 10px',
                   font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
                   textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>Before</div>
-                <div style={{ flex: '1 1 0', minWidth: 0, padding: '7px 0 7px 73px',
+                <div style={{ flex: '1 1 0', minWidth: 0, padding: '7px 0 7px 10px',
                   font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
                   textTransform: 'uppercase', color: 'var(--text-tertiary)', borderLeft: '1px solid var(--border-subtle)' }}>After</div>
               </div>
@@ -714,6 +791,12 @@ export default function ReviewScreen(props) {
                 const hi = dragging ? Math.max(dragFrom, dragTo) : -1;
                 const isFirst = active && r === lo;
                 const isLast = active && r === hi;
+                // #3 persistent region tint (suppressed while actively dragging so
+                // the live selection reads cleanly). regFirst/regLast draw the box's
+                // top/bottom edge even across disjoint regions.
+                const region = !dragging && openRegionRows.has(r);
+                const regFirst = region && !openRegionRows.has(r - 1);
+                const regLast = region && !openRegionRows.has(r + 1);
                 // A row's measured height must include any open/collapsed thread that
                 // renders directly beneath it, so the measuring ref wraps both. The
                 // wrapper is a plain block (no flex/grid/height) — it does not alter
@@ -722,9 +805,11 @@ export default function ReviewScreen(props) {
                   <div key={r} ref={measure(gi)}>
                     <div data-line={r} style={{ display: 'flex', minWidth: 0 }}>
                       <Half cell={row.left} kind={row.kind} side="old" r={r}
-                        active={active} isFirst={isFirst} isLast={isLast} thread={thread} />
+                        active={active} isFirst={isFirst} isLast={isLast} thread={thread}
+                        region={region} regFirst={regFirst} regLast={regLast} />
                       <Half cell={row.right} kind={row.kind} side="new" r={r}
-                        active={active} isFirst={isFirst} isLast={isLast} thread={thread} />
+                        active={active} isFirst={isFirst} isLast={isLast} thread={thread}
+                        region={region} regFirst={regFirst} regLast={regLast} />
                     </div>
                     {thread && thread.open && (
                       <div ref={(el) => { if (el) threadEls.current[thread.id] = el; }}
@@ -745,7 +830,9 @@ export default function ReviewScreen(props) {
                           model={thread.model || 'sonnet'}
                           onSetModel={onSetThreadModel ? (m) => onSetThreadModel(thread.id, m) : undefined}
                           collapsed={false} onToggle={() => onOpenLine(thread.side || 'old', r)}
-                          onResolve={() => onResolve(thread.id)} onSend={(t, kind) => onSend(thread.id, t, kind)} />
+                          onResolve={() => onResolve(thread.id)} onSend={(t, kind) => onSend(thread.id, t, kind)}
+                          onDelete={onDeleteThread ? () => onDeleteThread(thread.id) : undefined}
+                          onNavigateCard={onNavigateCard} />
                       </div>
                     )}
                     {thread && !thread.open && (

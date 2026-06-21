@@ -18,6 +18,8 @@ export function Thread({
   onToggle,
   onResolve,
   onSend,
+  onDelete,
+  onNavigateCard,
   style = {},
 }) {
   const [draft, setDraft] = React.useState('');
@@ -37,6 +39,35 @@ export function Thread({
   // reflowed the virtualizer every frame).
   const [closing, setClosing] = React.useState(false);
   const closeWith = (fn) => () => { setClosing(true); setTimeout(() => fn && fn(), 175); };
+
+  // Markdown renderers for AI replies. `loupe-card:N` links become click-to-jump
+  // chips that navigate to review card N (the number from the prompt's jump list);
+  // any other link is rendered as inert styled text (this is a desktop webview —
+  // we don't navigate it to arbitrary AI-supplied URLs).
+  const mdComponents = React.useMemo(() => ({
+    a: ({ href, children }) => {
+      if (typeof href === 'string' && href.startsWith('loupe-card:')) {
+        const n = href.slice('loupe-card:'.length).trim();
+        return (
+          <button type="button" onClick={() => onNavigateCard && onNavigateCard(n)}
+            title="이 카드로 이동" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 1,
+              padding: 0, margin: 0, border: 'none', background: 'none', cursor: 'pointer',
+              color: 'var(--accent)', font: 'inherit', verticalAlign: 'baseline',
+              borderBottom: '1px solid var(--accent-line)', transition: 'var(--t-hover)' }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderBottomColor = 'var(--accent)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderBottomColor = 'var(--accent-line)'; }}>
+            {children}
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"
+              style={{ alignSelf: 'center', flex: 'none', opacity: 0.65 }}>
+              <path d="M7 17 17 7M9 7h8v8" /></svg>
+          </button>
+        );
+      }
+      return <span style={{ color: 'var(--text-secondary)', textDecoration: 'underline', textUnderlineOffset: 2 }}>{children}</span>;
+    },
+  }), [onNavigateCard]);
 
   if (collapsed) {
     const hasCommand = messages.some((m) => m.kind === 'command');
@@ -88,8 +119,23 @@ export function Thread({
         : 'loupe-thread-in var(--dur-slow) var(--ease-out)',
       padding: '14px 16px 13px', ...style,
     }}>
-      {/* quiet top-right actions: collapse + resolve */}
+      {/* quiet top-right actions: delete · collapse · resolve */}
       <div style={{ position: 'absolute', top: 0, right: 11, display: 'flex', gap: 2 }}>
+        {onDelete && (
+          <button onClick={closeWith(onDelete)} title="Delete thread"
+            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--flag)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 28, height: 28, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+              background: 'transparent', border: 'none', color: 'var(--text-tertiary)',
+              transition: 'var(--t-hover)' }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+            </svg>
+          </button>
+        )}
         <button onClick={closeWith(onToggle)} title="Collapse" style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           width: 28, height: 28, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
@@ -107,7 +153,7 @@ export function Thread({
         </button>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingRight: 52 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingRight: onDelete ? 86 : 52 }}>
         {messages.map((m, i) => {
           const ai = m.author === 'ai';
           const command = m.kind === 'command';
@@ -126,7 +172,7 @@ export function Thread({
               <div style={{ font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)',
                 color: ai ? 'var(--text-secondary)' : 'var(--text-primary)', textWrap: 'pretty' }}>
                 {ai
-                  ? <div className="loupe-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown></div>
+                  ? <div className="loupe-md"><ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents} urlTransform={(u) => u}>{m.text}</ReactMarkdown></div>
                   : m.text}
               </div>
             </div>
@@ -210,25 +256,85 @@ export function Thread({
 
 /**
  * ModelMenu — a compact dropdown to the left of the composer that picks which
- * model answers THIS thread (Sonnet / Haiku). A native <select> so its option
- * list renders in the OS layer and isn't clipped by the thread's overflow:hidden.
+ * model answers THIS thread (Sonnet / Haiku). A custom popover (mirroring the
+ * project's BranchSelect) rather than a native <select>. The popover is
+ * `position: fixed` (anchored off the trigger's rect) so it escapes the
+ * thread's `overflow: hidden` clip — the reason a native select was used before.
  */
+const MODEL_OPTIONS = [
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'haiku', label: 'Haiku' },
+];
 function ModelMenu({ model = 'sonnet', onSetModel }) {
-  const chevron =
-    "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a8f99' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>\")";
+  const [open, setOpen] = React.useState(false);
+  const [rect, setRect] = React.useState(null);
+  const trigRef = React.useRef(null);
+  const popRef = React.useRef(null);
+  const enabled = !!onSetModel;
+
+  React.useEffect(() => {
+    if (!open) return;
+    const close = (e) => {
+      if (trigRef.current && trigRef.current.contains(e.target)) return;
+      if (popRef.current && popRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+
+  const toggle = () => {
+    if (!enabled) return;
+    if (!open && trigRef.current) setRect(trigRef.current.getBoundingClientRect());
+    setOpen((v) => !v);
+  };
+  const current = MODEL_OPTIONS.find((o) => o.value === model) || MODEL_OPTIONS[0];
+
   return (
-    <select aria-label="모델 선택" title="이 스레드에 답할 모델"
-      value={model} disabled={!onSetModel}
-      onChange={(e) => onSetModel && onSetModel(e.target.value)}
-      style={{ flex: 'none', height: 22, padding: '0 23px 0 10px', borderRadius: 'var(--radius-pill)',
-        background: 'var(--surface-inset)', border: '1px solid var(--border-subtle)',
-        color: 'var(--text-secondary)', font: 'var(--weight-medium) 11px/1 var(--font-ui)',
-        cursor: onSetModel ? 'pointer' : 'default', outline: 'none',
-        appearance: 'none', WebkitAppearance: 'none',
-        backgroundImage: chevron, backgroundRepeat: 'no-repeat',
-        backgroundPosition: 'right 7px center' }}>
-      <option value="sonnet">Sonnet</option>
-      <option value="haiku">Haiku</option>
-    </select>
+    <React.Fragment>
+      <button ref={trigRef} onClick={toggle} type="button" title="이 스레드에 답할 모델"
+        style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: 5,
+          height: 22, padding: '0 8px 0 10px', borderRadius: 'var(--radius-pill)',
+          background: 'var(--surface-inset)',
+          border: `1px solid ${open ? 'var(--border-strong)' : 'var(--border-subtle)'}`,
+          color: open ? 'var(--text-primary)' : 'var(--text-secondary)',
+          font: 'var(--weight-medium) 11px/1 var(--font-ui)',
+          cursor: enabled ? 'pointer' : 'default', outline: 'none' }}>
+        <span>{current.label}</span>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"
+          strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-faint)', flex: 'none',
+            transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-soft)' }}><path d="M6 9l6 6 6-6" /></svg>
+      </button>
+      {open && rect && (
+        // Opens UPWARD (translateY -100%) — the composer sits low in the card, so
+        // a downward menu could fall off-screen. Fixed positioning dodges the
+        // thread's overflow:hidden.
+        <div ref={popRef} style={{ position: 'fixed', left: rect.left, top: rect.top,
+          transform: 'translateY(calc(-100% - 6px))',
+          minWidth: rect.width, zIndex: 60, background: 'var(--surface-overlay)',
+          border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
+          boxShadow: 'var(--shadow-pop)', padding: 4 }}>
+          {MODEL_OPTIONS.map((o) => {
+            const sel = o.value === model;
+            return (
+              <button key={o.value} type="button" onClick={() => { onSetModel(o.value); setOpen(false); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 8px',
+                  borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left', border: 'none',
+                  whiteSpace: 'nowrap', background: sel ? 'var(--accent-dim)' : 'transparent',
+                  color: sel ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  font: 'var(--weight-medium) 12px/1 var(--font-ui)', transition: 'background var(--dur-fast) var(--ease-soft)' }}
+                onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = 'var(--surface-inset)'; }}
+                onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = 'transparent'; }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8"
+                  strokeLinecap="round" strokeLinejoin="round" style={{ color: sel ? 'var(--accent)' : 'transparent', flex: 'none' }}><path d="M20 6 9 17l-5-5" /></svg>
+                <span style={{ flex: 1 }}>{o.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </React.Fragment>
   );
 }

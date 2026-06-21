@@ -225,7 +225,7 @@ export default function ProjectMenu({
   const commit = () => {
     if (!repoPath || !b || !t) return;
     try {
-      const next = [repoPath, ...recents.filter((r) => r !== repoPath)].slice(0, 6);
+      const next = [repoPath, ...recents.filter((r) => r !== repoPath)].slice(0, 4);
       setRecents(next);
       window.localStorage.setItem('loupe.recents', JSON.stringify(next));
     } catch { /* storage unavailable — non-fatal */ }
@@ -244,7 +244,13 @@ export default function ProjectMenu({
   const optsFor = (value) => (branches.length > 0 ? branches : (value ? [value] : []));
 
   return (
-    <div ref={ref} style={{ position: 'absolute', top: 20, left: 24, zIndex: 40, width: 296 }}>
+    <div ref={ref} style={{ position: 'absolute', top: 20, left: 24, zIndex: 40,
+      // Size to the trigger so the bar grows with the folder name (open OR closed).
+      // Open keeps a 296 floor for the panel. Capped so the bar never reaches the
+      // centered "02 / 08 · cluster" title (≈ stage center).
+      width: 'max-content',
+      minWidth: open_ ? 296 : 0,
+      maxWidth: 'min(420px, calc(50vw - 300px))' }}>
       {/* one container: the trigger row IS the top of the panel; opening grows
          the same box downward (max-height), so it reads as a single component */}
       <div
@@ -264,22 +270,28 @@ export default function ProjectMenu({
             color: open_ ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
           <span style={{ color: 'currentColor', display: 'inline-flex', opacity: 0.7 }}><Ico d={folder} w={13} /></span>
           <span style={{ font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)', color: 'currentColor',
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 150 }}>{triggerLabel}</span>
-          {target ? <span style={{ width: 1, height: 12, background: 'var(--border-default)' }} /> : null}
-          {target ? <span style={{ font: 'var(--text-xs)/1 var(--font-mono)', color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>{target}</span> : null}
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            minWidth: 0, flexShrink: 1, flexGrow: 0 }}>{triggerLabel}</span>
+          {target ? <span style={{ width: 1, height: 12, background: 'var(--border-default)', flexShrink: 0 }} /> : null}
+          {target ? <span style={{ font: 'var(--text-xs)/1 var(--font-mono)', color: 'var(--text-tertiary)',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flexShrink: 2 }}>{target}</span> : null}
           <span style={{ flex: 1 }} />
           <span style={{ color: 'var(--text-faint)', display: 'inline-flex',
             transform: open_ ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-soft)' }}><Ico d={chev} w={12} /></span>
         </button>
 
-        {/* panel that expands straight down inside the same box */}
+        {/* panel that expands straight down inside the same box. Fixed 296 (collapsed
+           → 0) so its content never stretches the max-content trigger bar; when the
+           folder name makes the bar wider than 296, the panel just sits left-aligned. */}
         <div style={{ maxHeight: open_ ? 420 : 0, opacity: open_ ? 1 : 0,
+          width: open_ ? 296 : 0,
           transition: 'max-height var(--dur-slow) var(--ease-out), opacity var(--dur-base) var(--ease-soft)',
           overflow: 'hidden' }}>
-          <div style={{ padding: '4px 10px 10px', borderTop: '1px solid var(--border-subtle)' }}>
+          <div style={{ padding: '4px 10px 10px', borderTop: '1px solid var(--border-subtle)',
+            width: 296, boxSizing: 'border-box' }}>
             <label style={{ ...labelStyle, marginTop: 8 }}>Project</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 6 }}>
-              {recents.map((r) => (
+              {recents.slice(0, 4).map((r) => (
                 <button key={r} onClick={() => pickRecent(r)} title={r} style={{
                   display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
                   borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left',

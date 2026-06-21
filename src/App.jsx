@@ -85,6 +85,13 @@ export default function App() {
   const [threads, setThreads] = React.useState([]);
   const [treeOpen, setTreeOpen] = React.useState(false);
   const tid = React.useRef(1);
+  // Globally-unique thread id. A bare counter collided across sessions — it resets
+  // to 1 on every load while threads restored from disk keep their old t1.. ids, so
+  // a freshly-created thread could reuse an existing id. Then `threads.map(x.id===id)`
+  // wrote the SAME AI answer onto every thread sharing that id (and the context was
+  // built from the first match). The random suffix guarantees uniqueness regardless
+  // of the counter's state.
+  const genThreadId = () => 't' + (tid.current++) + Math.random().toString(36).slice(2, 6);
   // #8/#9 — unread AI answers. `unreadThreads` holds the ids of threads whose AI
   // reply has landed but the user has NOT yet expanded that thread to read it.
   //   • marked unread  = sendThread resolves while the thread is not visibly open
@@ -168,7 +175,9 @@ export default function App() {
             let arr;
             try { arr = JSON.parse(json || '[]'); } catch { arr = []; }
             if (!Array.isArray(arr)) arr = [];
-            setThreads(arr.map((t) => ({ ...t, pending: false, open: false })));
+            // Re-id every restored thread so any duplicate/colliding ids saved by an
+            // older build are repaired on load (distinct content is preserved).
+            setThreads(arr.map((t) => ({ ...t, id: genThreadId(), pending: false, open: false })));
             // Mark this key as loaded so the debounced save may now run for it.
             loadedKeyRef.current = keyOf(r.repoPath, r.base, r.target);
           })
@@ -343,9 +352,13 @@ export default function App() {
       clusterKind: cl ? cl.kind : null, clusterSummary: cl ? cl.summary : '',
       file: c.path.split('/').pop(), threads: threadCount(c.id),
       status: hasUnresolved(c.id) ? 'flag' : (verdicts[c.id] === 'pass' ? 'pass' : 'pending'),
-      // #8 spine signals: a card carrying an unread answer (`unread`) and whether
-      // its cluster is mid-flash because an answer just landed off-screen (`flash`).
+      // #8 spine signals: a card carrying an unread answer (`unread`), whether it
+      // has any thread at all (`hasThread` → cluster reads as yellow/needs-eyes),
+      // and whether its cluster is mid-flash because an answer landed off-screen.
       unread: hasUnread(c.id),
+      // Any thread on the card (a sent message OR a just-created open one) marks the
+      // cluster — so a comment shows immediately, even before a reply lands.
+      hasThread: threads.some((t) => t.cardId === c.id && ((t.messages && t.messages.length > 0) || t.open)),
       flash: flashCluster != null && clusterId === flashCluster,
     };
   });
@@ -354,7 +367,27 @@ export default function App() {
   // real cards returned by the engine).
   const tree = React.useMemo(() => buildTree(list), [list]);
 
-  const goTo = (i, d) => { setDir(d); setIndex(Math.max(0, Math.min(list.length - 1, i))); };
+  // Navigation back-stack: every time we land on a DIFFERENT card (paging, the
+  // spine, or a card-link jump in a thread), remember where we came from so cmd+E
+  // can return to it (IntelliJ "Back" style). Capped so it can't grow unbounded.
+  const backStack = React.useRef([]);
+  const goTo = (i, d) => {
+    const clamped = Math.max(0, Math.min(list.length - 1, i));
+    if (clamped !== index) {
+      backStack.current.push(index);
+      if (backStack.current.length > 100) backStack.current.shift();
+    }
+    setDir(d);
+    setIndex(clamped);
+  };
+  // cmd+E — jump back to the previously-visited card. Pops the history WITHOUT
+  // re-recording, so repeated presses keep stepping further back.
+  const goBack = () => {
+    if (backStack.current.length === 0) return;
+    const prevIdx = Math.max(0, Math.min(list.length - 1, backStack.current.pop()));
+    setDir(prevIdx > index ? 1 : -1);
+    setIndex(prevIdx);
+  };
 
   const advance = () => {
     if (index >= list.length - 1) { setScreen('summary'); return; }
@@ -413,7 +446,7 @@ export default function App() {
     flashTimer.current = setTimeout(() => { flashTimer.current = null; setFlashCluster(null); }, 2400);
   };
 
-  const openLine = (side, lineN) => {
+  const openLine = (side, lineN, anchorRange) => {
     if (!card) return;
     // Threads are keyed by ROW now (before+after highlight together, GitHub-style);
     // `side` is only remembered so a collapsed badge sits in that column's gutter.
@@ -439,13 +472,30 @@ export default function App() {
       if (willOpen) clearUnread(existing.id);
       return;
     }
-    const id = 't' + (tid.current++);
+    const id = genThreadId();
     // No fabricated AI opener — a fresh thread is just the composer (empty
     // messages). The first real AI text arrives only after the user asks.
     setThreads((p) => [...p, {
       id, cardId: card.id, side: side || 'old', lineN, symbol: card.symbol, open: true, resolved: false,
       messages: [], pending: false, model: 'sonnet',
+      // #3 — the dragged ROW range this thread was created over. Lets the review
+      // screen faintly highlight exactly that region while the thread is open, so
+      // the reviewer always sees what the question is about. Absent for a single-
+      // line (plus-button) thread → falls back to just the anchor row.
+      from: anchorRange && anchorRange.from != null ? anchorRange.from : lineN,
+      to: anchorRange && anchorRange.to != null ? anchorRange.to : lineN,
+      // The literal selected code (#3 region), so the AI prompt can quote exactly
+      // what the user dragged — a vague "이거" then resolves to this region.
+      selection: anchorRange && anchorRange.text ? anchorRange.text : '',
     }]);
+  };
+
+  // #2 — delete a thread outright (distinct from resolve, which keeps history).
+  // Removes it from state (the debounced save effect then persists the removal)
+  // and drops any lingering unread mark.
+  const deleteThread = (id) => {
+    setThreads((p) => p.filter((t) => t.id !== id));
+    clearUnread(id);
   };
 
   // Per-thread model choice (#model): which CLI model answers this thread's
@@ -486,8 +536,13 @@ export default function App() {
       ? `\n(diff 발췌: 전체 ${total}줄 중 ${from + 1}–${to}줄 발췌)`
       : `\n(diff 전체 ${total}줄)`;
     const side = t && t.side ? t.side : 'old';
-    const target = `\n\n질문 대상: line ${t && t.lineN != null ? t.lineN : '?'} (${side})`;
-    return `${header}${span}\n\n${body}${target}`;
+    // The exact region the user dragged over — the referent of a vague "이거".
+    // Prefer the stored selection; fall back to the row index when absent (older
+    // threads created before selection capture, or a programmatic open).
+    const sel = t && t.selection
+      ? `\n\n--- 사용자가 선택(드래그)한 영역 ---\n${t.selection}`
+      : `\n\n질문 대상: line ${t && t.lineN != null ? t.lineN : '?'} (${side})`;
+    return `${header}${span}\n\n${body}${sel}`;
   }, []);
 
   const sendThread = (id, text, kind) => {
@@ -503,7 +558,15 @@ export default function App() {
     const t = threads.find((x) => x.id === id);
     if (!t) return;
     const c = (cards || []).find((x) => x.id === t.cardId);
-    const context = buildThreadContext(c, t);
+    // Jump targets: every review card in flow order, numbered. The agent links a
+    // reference to one of these as `[text](loupe-card:N)` (N = this list's number),
+    // which Thread renders as a click-to-jump (see onNavigateCard). Same `list`
+    // the spine/navigation use, so N maps back 1:1.
+    const jump = (list || [])
+      .map((cc, i) => `${i + 1}. ${cc.symbol || cc.path.split('/').pop()} — ${cc.path}`)
+      .join('\n');
+    const context = buildThreadContext(c, t)
+      + (jump ? `\n\n--- 점프 가능한 리뷰 카드 (이 변경에 포함된 카드 목록) ---\n${jump}` : '');
     const history = t.messages.map((m) => ({ author: m.author, text: m.text }));
 
     // Mark the thread as thinking (spinner row in Thread.jsx).
@@ -541,6 +604,9 @@ export default function App() {
   React.useEffect(() => {
     if (screen !== 'review') return;
     const onKey = (e) => {
+      // cmd/ctrl+E — Back to the previous card. Handled before the input guard so
+      // it works even while a thread composer is focused (it's a deliberate combo).
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'e' || e.key === 'E')) { e.preventDefault(); goBack(); return; }
       const tag = (e.target.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
       if (e.key === ' ') { e.preventDefault(); pass(); }
@@ -667,7 +733,8 @@ export default function App() {
           onPass={pass} onPrev={prev} onNext={next}
           threads={cardThreads}
           onOpenLine={openLine} onResolve={resolveThread} onSend={sendThread}
-          onSetThreadModel={setThreadModel}
+          onSetThreadModel={setThreadModel} onDeleteThread={deleteThread}
+          onNavigateCard={(n) => { const i = Number(n) - 1; if (i >= 0 && i < list.length) goTo(i, i > index ? 1 : -1); }}
         />
       )}
       {screen === 'summary' && (

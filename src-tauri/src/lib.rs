@@ -326,12 +326,24 @@ async fn ask_thread(
     // selected question, and invite it to read the relevant code (definitions / callers / related
     // files) so the answer is grounded in the actual codebase. Prior turns follow as a transcript.
     let mut prompt = String::from(
-        "You are a senior engineer reviewing a code change in THIS repository together with a \
-         user. Below is the change context (file / symbol / diff) and the user's question about a \
-         region they selected. When it helps, read the relevant code in this repo directly \
-         (definitions, callers, related files) and answer concisely and concretely, grounded in \
-         the ACTUAL codebase — not just the diff excerpt. Reply in the user's language (if the \
-         question is in Korean, answer in Korean). If you do not know, say so.\n\n",
+        "You are a senior engineer pair-reviewing a code change in THIS repository with a user. \
+         Below is the change context (file / symbol / diff), the SPECIFIC region the user selected \
+         in the diff, and their question about it. Answer their question — whatever it is — but \
+         keep your answer anchored to the SELECTED region: resolve a vague 'this' / '이거' / 'here' \
+         to that selected code, and don't drift onto unrelated parts of the repo unless the \
+         question clearly calls for it. When it helps, read the relevant code in this repo directly \
+         (definitions, callers, related files) so the answer is grounded in the ACTUAL codebase — \
+         not just the diff excerpt. \
+         \n\nJUMP LINKS (optional, only when natural): the context ends with a numbered list \
+         '점프 가능한 리뷰 카드' — the review cards in THIS change. Answer the question normally \
+         first. If — and only if — a place you genuinely need to mention happens to be one of \
+         those cards, you MAY make it clickable as a Markdown link [표시 텍스트](loupe-card:N) (N = \
+         its number in the list). Do NOT force references or bend your answer to fit the cards. \
+         When a caller / usage / related piece of code is NOT among these cards (i.e. not part of \
+         this diff), just say so plainly in prose — e.g. '이번 diff엔 없지만 `AuthService.login`에서 \
+         호출됩니다' — with no link. Most answers need few or no links; that is fine. \
+         \n\nReply in the user's language (if the question is in Korean, answer in Korean). Be \
+         concise and concrete. If you genuinely do not know, say so.\n\n",
     );
     prompt.push_str("--- Change context ---\n");
     prompt.push_str(&context);
@@ -424,14 +436,23 @@ struct BranchList {
     default: Option<String>,
 }
 
+// `async` + `spawn_blocking`: a *synchronous* Tauri command runs on the main
+// (UI) thread, so opening the repo + walking its refs would freeze the webview
+// for the duration — right after the user picks a folder, before the
+// "Reading branches…" indicator can even paint. git2 is blocking, so we hop it
+// onto the blocking pool and keep the UI thread free.
 #[tauri::command]
-fn list_branches(repo_path: String) -> Result<BranchList, String> {
-    let b = engine::list_branches(&repo_path).map_err(|e| e.to_string())?;
-    Ok(BranchList {
-        branches: b.branches,
-        current: b.current,
-        default: b.default,
+async fn list_branches(repo_path: String) -> Result<BranchList, String> {
+    tokio::task::spawn_blocking(move || {
+        let b = engine::list_branches(&repo_path).map_err(|e| e.to_string())?;
+        Ok::<BranchList, String>(BranchList {
+            branches: b.branches,
+            current: b.current,
+            default: b.default,
+        })
     })
+    .await
+    .map_err(|e| format!("branch scan task panicked: {e}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

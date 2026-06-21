@@ -385,14 +385,30 @@ pub async fn ask_agentic(
     bin: Option<String>,
 ) -> Result<String, String> {
     let bin = bin.unwrap_or_else(|| DEFAULT_CLAUDE_BIN.to_string());
-    let args = build_agentic_args(&prompt, model);
+    let mut args = build_agentic_args(&prompt, model);
+    // Grant the agent READ access to the repo via --add-dir, NOT by making the repo
+    // the cwd. Running with cwd=repo makes the `claude` CLI auto-discover and inject
+    // the repo's CLAUDE.md as authoritative project instructions, which hijacks the
+    // agent: a "이거 설명해줘 / explain this code" question comes back as the repo's
+    // build/sqlx/clippy setup rules (the agent even invents a compile error to match
+    // CLAUDE.md). --add-dir keeps real code reads + OAuth without that auto-load.
+    // (Verified against dearday: cwd=repo drifts to build advice; neutral cwd +
+    // --add-dir answers the actual code question.)
+    args.push("--add-dir".into());
+    args.push(repo_path);
+
+    // Neutral cwd: an EMPTY scratch dir with no CLAUDE.md, so nothing is auto-loaded
+    // as project instructions. Read tools stay confined to cwd + the --add-dir repo.
+    let cwd = std::env::temp_dir().join("loupe-agent-cwd");
+    let _ = std::fs::create_dir_all(&cwd);
+    let cwd = if cwd.is_dir() { cwd } else { std::env::temp_dir() };
 
     // The CLI is blocking; run it on the blocking pool. The closure owns everything it needs.
     let spawn = tokio::task::spawn_blocking(move || {
         Command::new(&bin)
             .args(&args)
-            // Give the agent the repo as context AND confine its read tools to that tree.
-            .current_dir(&repo_path)
+            // Neutral cwd (see above) — repo access comes from --add-dir, not cwd.
+            .current_dir(&cwd)
             // Setup-token via env only — never on argv, never logged.
             .env(TOKEN_ENV, token)
             // Resolve `claude` even when launched from Finder (minimal GUI PATH).
