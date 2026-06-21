@@ -53,12 +53,13 @@ export function AnalyzeScreen({ progress }) {
     : 'Merging and ordering by data flow';
 
   return (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', background: 'var(--bg-base)' }}>
+    <div data-tauri-drag-region style={{ position: 'absolute', inset: 0, display: 'flex', background: 'var(--bg-base)' }}>
 
       {/* LEFT — the queue rail, building up as clusters finish */}
       <div style={{ width: 300, flex: 'none', borderRight: '1px solid var(--border-subtle)',
         background: 'var(--bg-raised)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ padding: '22px 22px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
+        {/* extra top padding clears the overlay title bar's traffic lights */}
+        <div style={{ padding: '52px 22px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
           <div style={{ font: 'var(--weight-semibold) var(--text-sm)/1 var(--font-ui)', color: 'var(--text-primary)' }}>Review queue</div>
           <div style={{ font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-tertiary)', marginTop: 6 }}>
             {doneCards} of {totalCards} changes

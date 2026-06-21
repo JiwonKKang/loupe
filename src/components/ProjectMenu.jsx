@@ -37,7 +37,7 @@ const basename = (p) => {
 // Custom branch dropdown: a trigger button (current value + chevron) and a
 // fixed-positioned popover (a check per option, accent on the selected one).
 // Replaces the native <select> so Base/Target match the design kit.
-function BranchSelect({ value, options, onChange, fieldStyle }) {
+function BranchSelect({ value, options, onChange, fieldStyle, loading = false }) {
   const [open, setOpen] = React.useState(false);
   const [rect, setRect] = React.useState(null);
   const [query, setQuery] = React.useState('');
@@ -113,7 +113,15 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
           <div style={{ overflowY: 'auto', maxHeight: 232, minWidth: 0,
             // a thin custom scrollbar so a long branch list reads as scrollable
             scrollbarWidth: 'thin' }}>
-            {filtered.length === 0 ? (
+            {loading ? (
+              <div style={{ padding: '8px', display: 'flex', alignItems: 'center', gap: 8,
+                font: '12px/1.3 var(--font-ui)', color: 'var(--text-tertiary)' }}>
+                <span style={{ width: 11, height: 11, flex: 'none', borderRadius: '50%',
+                  border: '2px solid var(--border-strong)', borderTopColor: 'var(--accent)',
+                  animation: 'loupe-spin 0.7s linear infinite' }} />
+                브랜치 불러오는 중…
+              </div>
+            ) : filtered.length === 0 ? (
               <div style={{ padding: '8px', font: '12px/1.3 var(--font-ui)', color: 'var(--text-faint)' }}>
                 일치하는 브랜치 없음
               </div>
@@ -145,7 +153,7 @@ function BranchSelect({ value, options, onChange, fieldStyle }) {
 
 export default function ProjectMenu({
   project, base, target, branches: branchesProp, recents: recentsProp,
-  onChangeProject, onBrowse, defaultOpen = false, pinned = false, prominent = false,
+  onChangeProject, onBrowse, defaultOpen = false, pinned = false, prominent = false, left = 102,
 }) {
   // `pinned` (used by App's pickProject shell, where there is no project yet):
   // the menu must stay open — outside-click never closes it and the trigger
@@ -174,6 +182,9 @@ export default function ProjectMenu({
   const [branchLoading, setBranchLoading] = React.useState(false);
   const [branchError, setBranchError] = React.useState(null);
   const [picking, setPicking] = React.useState(false);
+  // True while a Browse…/pick-recent loadBranches() is fetching (it also sets the
+  // range defaults). The background prefetch reads this to avoid a double request.
+  const loadingRangeRef = React.useRef(false);
 
   // localStorage-backed recents (most-recent-first repoPath array). The prop
   // wins if provided; otherwise we read the store.
@@ -195,6 +206,25 @@ export default function ProjectMenu({
     setT(target || '');
     if (Array.isArray(branchesProp)) setBranches(branchesProp);
   }, [project, base, target, branchesProp, open_]);
+
+  // Prefetch the chosen repo's branch list as soon as a repo is set — on ANY
+  // screen (the pick-project shell, review, summary), and whether it came from the
+  // prop, Browse…, or a recent — so expanding Base/Target is instant (no lazy
+  // per-open round-trip). Only fills the list; base/target stay as given. The
+  // `branchLoading` guard skips this when a browse/pick-recent `loadBranches()` is
+  // already fetching (it sets the range defaults), so there's no double request.
+  React.useEffect(() => {
+    if (!repoPath || Array.isArray(branchesProp) || loadingRangeRef.current) return;
+    let alive = true;
+    setBranchLoading(true);
+    setBranchError(null);
+    invoke('list_branches', { repoPath })
+      .then((res) => { if (alive && res && Array.isArray(res.branches)) setBranches(res.branches); })
+      .catch(() => { /* not a git repo / unreadable — leave the current value */ })
+      .finally(() => { if (alive) setBranchLoading(false); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoPath, branchesProp]);
 
   // Keep the panel open while pinned (e.g. pickProject), even if it was never
   // toggled — covers a parent flipping `pinned` true after mount.
@@ -231,6 +261,7 @@ export default function ProjectMenu({
   // Read the chosen repo's branches and seed base/target defaults (default for
   // base, current for target — same convention as onboarding).
   const loadBranches = async (dir) => {
+    loadingRangeRef.current = true;
     setBranchLoading(true);
     setBranchError(null);
     setBranches([]);
@@ -255,6 +286,7 @@ export default function ProjectMenu({
       setBranches([]); setB(''); setT('');
     } finally {
       setBranchLoading(false);
+      loadingRangeRef.current = false;
     }
   };
 
@@ -308,7 +340,7 @@ export default function ProjectMenu({
   const optsFor = (value) => (branches.length > 0 ? branches : (value ? [value] : []));
 
   return (
-    <div ref={ref} style={{ position: 'absolute', top: 13, left: 102, zIndex: 40,
+    <div ref={ref} style={{ position: 'absolute', top: 13, left, zIndex: 40,
       // Size to the trigger so the bar grows with the folder name (open OR closed).
       // Open keeps a 296 floor for the panel. Capped so the bar never reaches the
       // centered "02 / 08 · cluster" title (≈ stage center).
@@ -398,11 +430,11 @@ export default function ProjectMenu({
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <label style={labelStyle}>Base</label>
-                <BranchSelect value={b} options={optsFor(b)} onChange={setB} fieldStyle={fieldStyle} />
+                <BranchSelect value={b} options={optsFor(b)} onChange={setB} fieldStyle={fieldStyle} loading={branchLoading} />
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <label style={labelStyle}>Target</label>
-                <BranchSelect value={t} options={optsFor(t)} onChange={setT} fieldStyle={fieldStyle} />
+                <BranchSelect value={t} options={optsFor(t)} onChange={setT} fieldStyle={fieldStyle} loading={branchLoading} />
               </div>
             </div>
 

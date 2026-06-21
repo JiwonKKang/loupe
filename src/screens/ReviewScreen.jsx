@@ -804,17 +804,17 @@ export default function ReviewScreen(props) {
       style={{ position: 'absolute', inset: 0, display: 'flex',
         background: 'var(--bg-base)', overflow: 'hidden' }}>
 
-      {/* Top-left project / branch menu — anchored to the SCREEN root (not the stage)
-          so its x matches the summary / pick-project screens (which have no spine
-          rail offsetting it). Same distance from the traffic lights everywhere. */}
-      <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} />
-
       {/* Queue spine — dim until hovered */}
       <ProgressSpine items={spineItems} activeId={card.id} onSelect={onSelect} />
 
       {/* Stage */}
       <div style={{ flex: 1, position: 'relative', display: 'flex',
         flexDirection: 'column', minWidth: 0 }}>
+
+        {/* Top-left project / branch menu — inside the stage so it shifts right when
+            the spine expands. left:84 puts it at x = rail-width(18) + 84 = 102, the
+            same resting distance as the summary / pick-project screens (root, 102). */}
+        <ProjectMenu project={project} base={base} target={target} onChangeProject={onChangeProject} left={84} />
 
         {/* Top bar — the cluster you're reviewing (prominent) + a subtle progress count.
             The cluster title is the orienting label, so it reads clearly (not dimmed).

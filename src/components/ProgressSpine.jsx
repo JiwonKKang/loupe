@@ -103,11 +103,14 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
         overflow: 'hidden', flex: 'none',
         opacity: expanded ? 1 : 0.7,
         display: 'flex', flexDirection: 'column',
+        // Non-scrolling top inset reserves the overlay title bar's traffic-light
+        // zone, so the scroll viewport (and any scrolled dots) stays BELOW it.
+        paddingTop: 46,
       }}
     >
       <div ref={scrollRef} style={{
         flex: 1, overflowY: 'auto', overflowX: 'hidden',
-        padding: expanded ? '54px 20px' : '54px 0',
+        padding: expanded ? '12px 20px' : '12px 0',
         display: 'flex', flexDirection: 'column',
         alignItems: expanded ? 'stretch' : 'center',
         gap: expanded ? 22 : 0,
