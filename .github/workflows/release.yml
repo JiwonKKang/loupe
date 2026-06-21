@@ -40,14 +40,26 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      - name: Build + publish release (universal .dmg, ad-hoc signed)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Build the universal app. macOS DMG bundling (bundle_dmg.sh runs an
+      # AppleScript to lay out the volume window) is flaky on headless runners,
+      # so retry the whole build a few times — the compiled .app is cached, so a
+      # retry only re-bundles the DMG (seconds). Keeps the run green first try.
+      - name: Build (retry — flaky DMG bundling)
+        uses: nick-fields/retry@v3
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Loupe ${{ github.ref_name }}"
-          releaseBody: |
+          timeout_minutes: 40
+          max_attempts: 3
+          retry_wait_seconds: 15
+          command: npm run tauri build -- --target universal-apple-darwin
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Loupe ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+          body: |
             Unsigned (ad-hoc) macOS build — install with Homebrew:
 
                 brew install --cask JiwonKKang/loupe/loupe
@@ -56,6 +68,6 @@ jobs:
             from an unidentified developer — right-click the app → **Open**, or:
 
                 xattr -dr com.apple.quarantine /Applications/Loupe.app
-          releaseDraft: false
-          prerelease: false
-          args: --target universal-apple-darwin
+          files: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
