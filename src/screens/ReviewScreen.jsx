@@ -225,6 +225,9 @@ export default function ReviewScreen(props) {
   const [dragTo, setDragTo] = React.useState(null);
   const [hover, setHover] = React.useState(null); // { side, r }
   const dragging = dragFrom != null;
+  // While selecting text, lock selection to ONE side (before OR after) so a copy
+  // drag doesn't grab both columns. Set on mousedown over a side, cleared on mouseup.
+  const [selectSide, setSelectSide] = React.useState(null);
   // Brief "pressed" flash on the ⌘-clicked cell — only the side (before/after)
   // you actually clicked, not both. Holds { r, side } | null.
   const [flashRow, setFlashRow] = React.useState(null);
@@ -264,20 +267,24 @@ export default function ReviewScreen(props) {
     threads.forEach((t) => { m[t.lineN] = t; });
     return m;
   }, [threads]);
+  // While a thread is open, hide the "+" entirely (it shouldn't linger under the cursor).
+  const anyOpenThread = threads.some((t) => t.open);
+  // A collapsed thread's badge under the cursor → preview its region too.
+  const [hoverThreadId, setHoverThreadId] = React.useState(null);
 
-  // #3 — rows covered by an OPEN thread's dragged region. While such a thread is
-  // expanded we faintly tint exactly those rows so the reviewer sees what the
-  // question is about. A Set (not a single lo..hi span) so two disjoint open
+  // #3 — rows covered by an OPEN thread's dragged region (or the collapsed thread
+  // whose badge is hovered). We faintly tint exactly those rows so the reviewer
+  // sees what the thread is about. A Set (not a single lo..hi span) so two disjoint
   // threads don't bleed a highlight across the gap between them.
   const openRegionRows = React.useMemo(() => {
     const s = new Set();
     threads.forEach((t) => {
-      if (t.open && t.from != null && t.to != null) {
+      if ((t.open || t.id === hoverThreadId) && t.from != null && t.to != null) {
         for (let k = t.from; k <= t.to; k++) s.add(k);
       }
     });
     return s;
-  }, [threads]);
+  }, [threads, hoverThreadId]);
 
   // ---- Fold unchanged context so big functions fit at a glance ----
   // Keep CONTEXT lines of context around each change; collapse the rest into
@@ -385,7 +392,10 @@ export default function ReviewScreen(props) {
   const codeContentW = Math.ceil(maxChars * chPx + 28);
   // Responsive card width: grows with the actual code length up to a max, so
   // short changes get a compact card and long ones widen toward the cap.
-  const cardW = Math.max(760, Math.min(1440, (52 + codeContentW) * 2 + 6));
+  // No hard px cap: grow with the code, and let the card wrapper's maxWidth:100%
+  // (the stage's 76px side padding, which clears the edge nav arrows) cap it to the
+  // window. So the card is as wide as it needs, up to just inside the arrows.
+  const cardW = Math.max(760, (52 + codeContentW) * 2 + 6);
   const diffRef = React.useRef(null);
   // The two bottom horizontal scrollbars (one per side) are the ONLY horizontal
   // controls. Their onScroll writes a CSS variable (--hs-old / --hs-new) on the
@@ -686,7 +696,7 @@ export default function ReviewScreen(props) {
     const isChange = kind === 'change';
     const tone = side === 'old' ? 'del' : 'add';
     const filled = !!cell;
-    const showPlus = filled && !thread && ((!dragging && hover && hover.side === side && hover.r === r)
+    const showPlus = filled && !thread && !anyOpenThread && ((!dragging && hover && hover.side === side && hover.r === r)
       || (dragging && dragSide === side && dragTo === r));
     const bg = flash ? 'rgba(110, 139, 255, 0.22)'
       : active ? 'rgba(110, 139, 255, 0.20)'
@@ -715,7 +725,21 @@ export default function ReviewScreen(props) {
     }
     const sign = isChange && filled ? (side === 'old' ? '−' : '+') : '';
     const handlers = filled ? {
-      onMouseEnter: () => { if (dragging) { setDragTo(r); } else { setHover({ side, r }); } },
+      // While dragging the + → extend the selection on row entry.
+      onMouseEnter: () => { if (dragging) setDragTo(r); },
+      // Show the "+" only when the cursor is near the LEFT gutter (not over the
+      // code text) — so it doesn't pop up everywhere, and hovering the code to
+      // select text doesn't churn hover state (which caused the flicker).
+      onMouseMove: (e) => {
+        if (dragging) return;
+        const near = (e.clientX - e.currentTarget.getBoundingClientRect().left) < 58;
+        setHover((h) => {
+          const isThis = h && h.side === side && h.r === r;
+          if (near && !isThis) return { side, r };
+          if (!near && isThis) return null;
+          return h; // unchanged → React bails, no re-render
+        });
+      },
       onMouseLeave: () => { if (!dragging) setHover((h) => (h && h.side === side && h.r === r ? null : h)); },
       // ⌘/Ctrl held → open in editor immediately (on mousedown, the most reliable
       // signal in the webview), NOT a drag-to-comment.
@@ -724,9 +748,11 @@ export default function ReviewScreen(props) {
           e.preventDefault(); e.stopPropagation();
           pressRow(r, side);
           if (onOpenInEditor && navLine) onOpenInEditor(card.path, navLine);
+          return;
         }
-        // A plain click on a line does nothing — threads start ONLY from the
-        // hover "+" button (click for one line, drag for a range).
+        // Plain mousedown starts a native text selection — lock it to THIS side so
+        // the copy drag never spills into the other column. Threads are +-only.
+        setSelectSide(side);
       },
     } : {};
     return (
@@ -735,21 +761,25 @@ export default function ReviewScreen(props) {
         boxShadow, flex: '1 1 0', minWidth: 0,
         borderLeft: side === 'new' ? '1px solid var(--border-subtle)' : 'none',
         transition: 'background var(--dur-fast) var(--ease-soft)' }}>
-        {showPlus && (
-          <button
-            onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); }}
-            title="Comment on this line (drag to select a range)"
-            style={{ position: 'absolute', zIndex: 4, left: 1, top: Math.max(0, (codeFs * 1.72 - 20) / 2),
-              width: 20, height: 20, borderRadius: 'var(--radius-sm)',
-              cursor: dragging ? 'grabbing' : 'pointer',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              background: 'var(--accent)', border: 'none', color: '#fff',
-              pointerEvents: dragging ? 'none' : 'auto',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              strokeWidth="3.8" strokeLinecap="round"><path d="M12 4v16M4 12h16" /></svg>
-          </button>
-        )}
+        {showPlus && (() => {
+          // Scale the + with the code font so it never dwarfs small text.
+          const sz = Math.max(13, Math.min(28, Math.round(codeFs * 1.5)));
+          return (
+            <button
+              onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); }}
+              title="Comment on this line (drag to select a range)"
+              style={{ position: 'absolute', zIndex: 4, left: 1, top: Math.max(0, (codeFs * 1.72 - sz) / 2),
+                width: sz, height: sz, borderRadius: 'var(--radius-sm)',
+                cursor: dragging ? 'grabbing' : 'pointer',
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                background: 'var(--accent)', border: 'none', color: '#fff',
+                pointerEvents: dragging ? 'none' : 'auto',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }}>
+              <svg width={sz} height={sz} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="3.6" strokeLinecap="round"><path d="M12 2v20M2 12h20" /></svg>
+            </button>
+          );
+        })()}
         <span></span>
         <span style={{ textAlign: 'right', paddingRight: 5, color: 'var(--text-faint)',
           font: codeFs + 'px/var(--leading-code) var(--font-mono)', userSelect: 'none' }}>{cell ? cell.n : ''}</span>
@@ -760,6 +790,7 @@ export default function ReviewScreen(props) {
           font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
           <span style={{ display: 'inline-block', boxSizing: 'border-box', minWidth: codeContentW, whiteSpace: 'pre',
             paddingLeft: 8, paddingRight: 16, tabSize: 2,
+            userSelect: selectSide && selectSide !== side ? 'none' : 'text',
             transform: 'translateX(calc(var(--hs-' + side + ') * -1))' }}>
             {cell ? hl(cell.c) : ''}
           </span>
@@ -769,7 +800,7 @@ export default function ReviewScreen(props) {
   };
 
   return (
-    <div onMouseUp={endDrag}
+    <div onMouseUp={() => { endDrag(); setSelectSide(null); }}
       style={{ position: 'absolute', inset: 0, display: 'flex',
         background: 'var(--bg-base)', overflow: 'hidden' }}>
 
@@ -842,9 +873,22 @@ export default function ReviewScreen(props) {
           <div key={card.id} style={{
             position: 'relative', zIndex: 3,
             width: '100%', maxHeight: '100%', display: 'flex', flexDirection: 'column',
-            background: 'var(--surface-card)', border: '1px solid var(--border-subtle)',
+            // Lit-from-above gradient (subtle sheen at the top, settling into shadow
+            // at the bottom) over the base surface — gives the card a premium, raised feel.
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0) 15%, rgba(0,0,0,0.05) 100%), var(--surface-card)',
+            border: '1px solid var(--border-subtle)',
             borderRadius: 'var(--radius-card)',
-            boxShadow: '0 2px 5px rgba(0,0,0,0.45), 0 20px 50px rgba(0,0,0,0.5), 0 46px 100px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05), inset 0 0 0 1px var(--border-subtle)',
+            // Layered drop shadows (tight contact → wide ambient) for float, plus a
+            // beveled rim: bright top sheen + dark inner bottom edge.
+            boxShadow: [
+              '0 1px 2px rgba(0,0,0,0.55)',
+              '0 5px 12px rgba(0,0,0,0.45)',
+              '0 20px 46px rgba(0,0,0,0.5)',
+              '0 50px 110px rgba(0,0,0,0.45)',
+              'inset 0 1px 0 rgba(255,255,255,0.09)',
+              'inset 0 -1px 0 rgba(0,0,0,0.35)',
+              'inset 0 0 0 1px rgba(255,255,255,0.02)',
+            ].join(', '),
             animation: `loupe-card-in var(--dur-slow) var(--ease-out)`,
             ['--enter-x']: `${dir * 36}px`, overflow: 'hidden',
           }}>
@@ -974,24 +1018,32 @@ export default function ReviewScreen(props) {
                           onNavigateCard={onNavigateCard} />
                       </div>
                     )}
-                    {thread && !thread.open && (
-                      <div style={{ display: 'flex', minWidth: 0 }}>
-                        {(thread.side || 'old') === 'old'
-                          ? <div style={{ flex: '1 1 0', minWidth: 0, padding: '6px 0 8px 52px' }}>
-                              <Thread messages={thread.messages} resolved={thread.resolved}
-                                unread={unreadThreads.has(thread.id)}
-                                collapsed onToggle={() => onOpenLine('old', r)} />
-                            </div>
-                          : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
-                        {(thread.side || 'old') === 'new'
-                          ? <div style={{ flex: '1 1 0', minWidth: 0, padding: '6px 0 8px 52px' }}>
-                              <Thread messages={thread.messages} resolved={thread.resolved}
-                                unread={unreadThreads.has(thread.id)}
-                                collapsed onToggle={() => onOpenLine('new', r)} />
-                            </div>
-                          : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
-                      </div>
-                    )}
+                    {thread && !thread.open && (() => {
+                      // Fixed spot: right next to the line-number gutter (the code
+                      // column), the SAME for every thread. Preview region on hover.
+                      const onNewSide = (thread.side || 'old') === 'new';
+                      const hov = {
+                        onMouseEnter: () => setHoverThreadId(thread.id),
+                        onMouseLeave: () => setHoverThreadId((id) => (id === thread.id ? null : id)),
+                      };
+                      // Only the AFTER (new) side badge sits at 85px; the before side
+                      // stays at the code column (52).
+                      const badge = (sd) => (
+                        <div style={{ flex: '1 1 0', minWidth: 0,
+                          padding: `6px 0 8px ${sd === 'new' ? 95 : 52}px` }} {...hov}>
+                          <Thread messages={thread.messages} resolved={thread.resolved}
+                            unread={unreadThreads.has(thread.id)}
+                            collapsed onToggle={() => onOpenLine(sd, r)} />
+                        </div>
+                      );
+                      const onNew = onNewSide;
+                      return (
+                        <div style={{ display: 'flex', minWidth: 0 }}>
+                          {onNew ? <div style={{ flex: '1 1 0', minWidth: 0 }} /> : badge('old')}
+                          {onNew ? badge('new') : <div style={{ flex: '1 1 0', minWidth: 0 }} />}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}

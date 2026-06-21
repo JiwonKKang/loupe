@@ -101,7 +101,7 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
         background: expanded ? 'var(--bg-raised)' : 'transparent',
         borderRight: `1px solid ${expanded ? 'var(--border-subtle)' : 'transparent'}`,
         overflow: 'hidden', flex: 'none',
-        opacity: expanded ? 1 : 'var(--dim-rest)',
+        opacity: expanded ? 1 : 0.7,
         display: 'flex', flexDirection: 'column',
       }}
     >

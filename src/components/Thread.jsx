@@ -70,40 +70,30 @@ export function Thread({
   }), [onNavigateCard]);
 
   if (collapsed) {
-    const hasCommand = messages.some((m) => m.kind === 'command');
-    // #9 — a collapsed thread that has an unread AI answer (the user hasn't
-    // expanded it since the reply landed) reads as "답변 왔음": the pill keeps the
-    // accent tone even if resolved-styling would otherwise dim it, gains an accent
-    // ring glow, and carries a pulsing accent dot. Read = expanding the thread,
-    // which clears unread upstream (App.openLine), so this only shows pre-open.
+    // Unread (an AI reply not yet opened) shows as a plain yellow dot — no pulse,
+    // no glow. Read = expanding the thread, which clears unread upstream.
     const showUnread = unread && !resolved;
     return (
-      <button onClick={onToggle} title={showUnread ? '답변 왔음 — 펼쳐서 확인하세요' : undefined} style={{
+      <button onClick={onToggle} title={showUnread ? '안 읽은 답변 — 펼쳐서 확인하세요' : undefined} style={{
         display: 'inline-flex', alignItems: 'center', gap: 6,
         height: 22, padding: '0 9px', borderRadius: 'var(--radius-pill)',
-        background: resolved && !showUnread ? 'var(--surface-overlay)' : 'var(--accent-dim)',
-        border: `1px solid ${resolved && !showUnread ? 'var(--border-default)' : 'var(--accent-line)'}`,
-        color: resolved && !showUnread ? 'var(--text-tertiary)' : 'var(--accent)',
+        background: resolved ? 'var(--surface-overlay)' : 'var(--accent-dim)',
+        border: `1px solid ${resolved ? 'var(--border-default)' : 'var(--accent-line)'}`,
+        color: resolved ? 'var(--text-tertiary)' : 'var(--accent)',
         font: `var(--weight-medium) 11px/1 var(--font-ui)`,
         cursor: 'pointer',
-        boxShadow: showUnread ? '0 0 0 3px var(--accent-dim), 0 0 12px 1px rgba(110,139,255,0.35)' : 'none',
         animation: 'loupe-thread-badge-in var(--dur-base) var(--ease-out)',
         ...style,
       }}>
         {showUnread && (
-          <span aria-label="답변 왔음" style={{ width: 6, height: 6, borderRadius: 999, flex: 'none',
-            background: 'var(--accent)', marginRight: 1,
-            animation: 'loupe-unread-blink 1.4s var(--ease-soft) infinite' }} />
+          <span aria-label="안 읽음" style={{ width: 6, height: 6, borderRadius: 999, flex: 'none',
+            background: 'var(--flag)', marginRight: 1 }} />
         )}
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
         </svg>
         {messages.length}{resolved ? ' · resolved' : ''}
-        {hasCommand && !resolved && (
-          <span title="Has a change request" style={{ width: 5, height: 5, borderRadius: 999,
-            background: 'var(--flag)', marginLeft: 1 }} />
-        )}
       </button>
     );
   }
@@ -186,9 +176,9 @@ export function Thread({
             {/* #1 — AI 대기 로딩 = 로고 로딩. A small accent core that breathes with
                 the same loupe-core-glow halo the brand mark uses (not a generic
                 spinner ring). The 4px margin leaves room for the glow box-shadow. */}
-            <span style={{ width: 10, height: 10, borderRadius: 999, flex: 'none',
-              margin: 4, background: 'var(--accent)',
-              animation: 'loupe-core-glow 2s var(--ease-soft) infinite' }} />
+            <span style={{ width: 8, height: 8, borderRadius: 999, flex: 'none',
+              margin: 6, background: 'var(--accent)',
+              animation: 'loupe-thinking 1.5s var(--ease-soft) infinite' }} />
             <span style={{ font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)',
               color: 'var(--text-tertiary)' }}>AI가 생각 중…</span>
           </div>
@@ -197,8 +187,8 @@ export function Thread({
 
       {!resolved && (
         <div style={{ marginTop: 11, paddingTop: 9, borderTop: '1px solid var(--border-subtle)' }}>
-          {/* #model + composer: the model dropdown sits to the LEFT of the textarea. */}
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          {/* one line: model dropdown · input · 질문/요청 buttons (no second row). */}
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
           <ModelMenu model={model} onSetModel={onSetModel} />
           <textarea
             ref={taRef}
@@ -216,21 +206,18 @@ export function Thread({
             placeholder="질문을 남기거나, 변경을 요청하세요…"
             style={{
               flex: 1, minWidth: 0, boxSizing: 'border-box', resize: 'none', overflow: 'hidden',
-              minHeight: 20, maxHeight: 160, display: 'block', marginTop: 3,
+              minHeight: 20, maxHeight: 160, display: 'block', alignSelf: 'center',
               background: 'transparent', border: 'none',
               color: 'var(--text-primary)', font: 'var(--text-sm)/var(--leading-snug) var(--font-ui)', outline: 'none',
             }}
           />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
-            <span style={{ flex: 1 }} />
             {(() => {
               const has = draft.trim().length > 0;
               const send = (kind) => { if (has) { onSend && onSend(draft.trim(), kind); setDraft(''); } };
               const btn = (label, kbd, kind, fg, bg, bd) => (
                 <button onClick={() => send(kind)} disabled={!has} title={label} style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 4, height: 20, padding: '0 7px',
-                  borderRadius: 'var(--radius-sm)', cursor: has ? 'pointer' : 'default',
+                  display: 'inline-flex', alignItems: 'center', gap: 4, height: 22, padding: '0 7px',
+                  flex: 'none', borderRadius: 'var(--radius-sm)', cursor: has ? 'pointer' : 'default',
                   background: bg, border: `1px solid ${bd}`, color: fg,
                   opacity: has ? 1 : 0.4, transition: 'var(--t-hover)',
                   font: 'var(--weight-medium) 10px/1 var(--font-ui)', whiteSpace: 'nowrap' }}>
@@ -327,9 +314,9 @@ function ModelMenu({ model = 'sonnet', onSetModel }) {
                   font: 'var(--weight-medium) 12px/1 var(--font-ui)', transition: 'background var(--dur-fast) var(--ease-soft)' }}
                 onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = 'var(--surface-inset)'; }}
                 onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = 'transparent'; }}>
+                <span style={{ flex: 1 }}>{o.label}</span>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8"
                   strokeLinecap="round" strokeLinejoin="round" style={{ color: sel ? 'var(--accent)' : 'transparent', flex: 'none' }}><path d="M20 6 9 17l-5-5" /></svg>
-                <span style={{ flex: 1 }}>{o.label}</span>
               </button>
             );
           })}

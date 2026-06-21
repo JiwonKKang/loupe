@@ -47,6 +47,14 @@ body { font-family: var(--font-ui); color: var(--text-primary);
   0%, 100% { box-shadow: 0 0 0 5px var(--accent-dim), 0 0 12px 1px rgba(110,139,255,0.30); }
   50%      { box-shadow: 0 0 0 7px var(--accent-dim), 0 0 22px 4px rgba(110,139,255,0.55); }
 }
+/* "AI is thinking" core — a louder throb than core-glow: the dot scales and its
+   accent glow breathes brightly, so the pending state is clearly alive. */
+@keyframes loupe-thinking {
+  0%, 100% { transform: scale(0.94);
+             box-shadow: 0 0 0 3px var(--accent-dim), 0 0 7px 1px rgba(110,139,255,0.32); }
+  50%      { transform: scale(1.06);
+             box-shadow: 0 0 0 5px var(--accent-dim), 0 0 15px 3px rgba(110,139,255,0.5); }
+}
 /* Unread-AI-answer pulse (#8/#9): a quiet opacity blink for a spine dot whose
    card holds an unread answer, and for the collapsed thread badge's accent dot.
    Distinct from loupe-core-glow (the logo-loading box-shadow throb) — this one
