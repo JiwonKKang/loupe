@@ -455,6 +455,86 @@ async fn list_branches(repo_path: String) -> Result<BranchList, String> {
     .map_err(|e| format!("branch scan task panicked: {e}"))?
 }
 
+/// Open the analyzed project in an external editor (IntelliJ / VS Code) and jump to
+/// `file:line` — for when the diff alone isn't enough and you want the whole file in
+/// context. We open the PROJECT (`repo_path`), not just the file, then navigate.
+///
+/// `editor`: "idea" | "code" | "auto" (auto tries `code`, then `idea`). We try the CLI
+/// launcher first (`code` / `idea` on the augmented PATH), then fall back to the binary
+/// INSIDE an installed `.app` bundle — so it works even when the user never installed the
+/// shell-command launcher. `code <project> --goto <file>:<line>` opens the folder window
+/// and reveals the line; `idea --line <line> <file>` opens the file's project and navigates.
+#[tauri::command]
+fn open_in_editor(
+    editor: String,
+    repo_path: String,
+    file: String,
+    line: u32,
+) -> Result<(), String> {
+    let abs = std::path::Path::new(&repo_path)
+        .join(&file)
+        .to_string_lossy()
+        .to_string();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let code_args = vec![repo_path.clone(), "--goto".to_string(), format!("{abs}:{line}")];
+    let idea_args = vec!["--line".to_string(), line.to_string(), abs.clone()];
+
+    // (binary, args) candidates, launcher first then bundled-app binaries.
+    let code_bins: Vec<String> = vec![
+        "code".into(),
+        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code".into(),
+        format!("{home}/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
+        "/Applications/VSCodium.app/Contents/Resources/app/bin/codium".into(),
+        "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code-insiders".into(),
+    ];
+    let idea_bins: Vec<String> = vec![
+        "idea".into(),
+        "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea".into(),
+        "/Applications/IntelliJ IDEA CE.app/Contents/MacOS/idea".into(),
+        "/Applications/IntelliJ IDEA Ultimate.app/Contents/MacOS/idea".into(),
+        format!("{home}/Applications/IntelliJ IDEA.app/Contents/MacOS/idea"),
+        format!("{home}/Applications/IntelliJ IDEA CE.app/Contents/MacOS/idea"),
+    ];
+    let path = engine::ai::cli::augmented_path();
+    let launch = |bin: &str, args: &[String]| -> bool {
+        std::process::Command::new(bin)
+            .args(args)
+            .env("PATH", &path)
+            .spawn()
+            .is_ok()
+    };
+    // VS Code: `code <project> --goto <file>:<line>` opens the folder AND navigates.
+    let open_code = || -> bool { code_bins.iter().any(|b| launch(b, &code_args)) };
+    // IntelliJ: a single `idea --line N <file>` only opens the lone file — so open
+    // the PROJECT dir first, then navigate to file:line (best-effort) in it.
+    let open_idea = || -> bool {
+        for b in &idea_bins {
+            if launch(b, std::slice::from_ref(&repo_path)) {
+                let _ = launch(b, &idea_args);
+                return true;
+            }
+        }
+        false
+    };
+    let opened = match editor.as_str() {
+        "idea" => open_idea(),
+        "code" => open_code(),
+        _ => open_code() || open_idea(), // auto
+    };
+    if opened {
+        return Ok(());
+    }
+    let which = match editor.as_str() {
+        "idea" => "IntelliJ IDEA",
+        "code" => "VS Code",
+        _ => "에디터",
+    };
+    Err(format!(
+        "{which}를 찾을 수 없어요 — 앱이 설치돼 있는지, 또는 CLI 런처가 있는지 확인하세요 \
+         (VS Code: ⌘⇧P → 'Shell Command: Install code', IntelliJ: Toolbox → Settings → 'Shell scripts')."
+    ))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -479,7 +559,8 @@ pub fn run() {
             load_token,
             clear_token,
             load_threads,
-            save_threads
+            save_threads,
+            open_in_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -10,6 +10,8 @@ import { Button } from '../components/Button';
 import { KeyHint } from '../components/KeyHint';
 import ProjectMenu from '../components/ProjectMenu';
 import { highlightGo } from '../data/fixtures';
+import intellijLogo from '../assets/editor-intellij.svg';
+import vscodeLogo from '../assets/editor-vscode.svg';
 
 // Memoize syntax highlighting per source string: the same line text re-tokenizes
 // to the same keyed span array, so windowing (mount/unmount as you scroll) never
@@ -89,6 +91,83 @@ function TextSizeMenu({ size, effective, onChange }) {
   );
 }
 
+// Global editor SELECTOR (bottom bar). Its trigger IS the active editor's logo;
+// the popover just SETS which editor ⌘-clicking a diff line opens into — it does
+// NOT open anything itself. Default IntelliJ. Dimmed at rest, lights up on hover.
+const EDITOR_LOGO = { idea: intellijLogo, code: vscodeLogo, auto: intellijLogo };
+function OpenInEditorMenu() {
+  const [open, setOpen] = React.useState(false);
+  const [rect, setRect] = React.useState(null);
+  // The active editor — its logo IS the trigger. Default IntelliJ.
+  const [current, setCurrent] = React.useState(() => {
+    try { return window.localStorage.getItem('loupe.editor') || 'idea'; } catch { return 'idea'; }
+  });
+  const trigRef = React.useRef(null);
+  const popRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const close = (e) => {
+      if (trigRef.current && trigRef.current.contains(e.target)) return;
+      if (popRef.current && popRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const toggle = () => {
+    if (!open && trigRef.current) setRect(trigRef.current.getBoundingClientRect());
+    setOpen((v) => !v);
+  };
+  // Select only — persist the choice; ⌘-click on a diff line does the opening.
+  const pick = (id) => {
+    setCurrent(id);
+    setOpen(false);
+    try { window.localStorage.setItem('loupe.editor', id); } catch { /* ignore */ }
+  };
+  const items = [
+    { id: 'idea', label: 'IntelliJ IDEA', logo: intellijLogo },
+    { id: 'code', label: 'VS Code', logo: vscodeLogo },
+  ];
+  return (
+    <React.Fragment>
+      <button ref={trigRef} onClick={toggle} type="button"
+        title="열 에디터 선택 (⌘-클릭으로 diff에서 열기)" aria-label="열 에디터 선택"
+        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: 'none',
+          width: 26, height: 26, borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          background: open ? 'var(--surface-overlay)' : 'transparent',
+          border: `1px solid ${open ? 'var(--border-default)' : 'transparent'}`,
+          opacity: open ? 1 : 'var(--dim-rest)', transition: 'var(--t-hover)' }}
+        onMouseEnter={(e) => { e.currentTarget.style.opacity = 1; }}
+        onMouseLeave={(e) => { if (!open) e.currentTarget.style.opacity = 'var(--dim-rest)'; }}>
+        <img src={EDITOR_LOGO[current] || intellijLogo} width="16" height="16" alt="" draggable="false" />
+      </button>
+      {open && rect && (
+        // Opens UPWARD (translateY -100%) — this control lives in the bottom bar.
+        <div ref={popRef} style={{ position: 'fixed', top: rect.top, left: rect.left,
+          transform: 'translateY(calc(-100% - 6px))',
+          width: 188, zIndex: 60, background: 'var(--surface-overlay)',
+          border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
+          boxShadow: 'var(--shadow-pop)', padding: 4 }}>
+          <div style={{ padding: '5px 8px 6px', font: 'var(--weight-medium) 10px/1 var(--font-ui)',
+            letterSpacing: 'var(--tracking-caps)', textTransform: 'uppercase', color: 'var(--text-faint)' }}>다음으로 열기</div>
+          {items.map((it) => (
+            <button key={it.id} type="button" onClick={() => pick(it.id)}
+              style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '8px',
+                borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left', border: 'none',
+                background: 'transparent', color: 'var(--text-secondary)',
+                font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-inset)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}>
+              <img src={it.logo} width="16" height="16" alt="" draggable="false" style={{ flex: 'none' }} />
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </React.Fragment>
+  );
+}
+
 export default function ReviewScreen(props) {
   const {
     card, index, total, dir, project, base, target, onChangeProject, unresolved,
@@ -96,7 +175,7 @@ export default function ReviewScreen(props) {
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
     onPass, onPrev, onNext, onJumpUnresolved,
-    threads, onOpenLine, onResolve, onSend, onSetThreadModel, onDeleteThread, onNavigateCard,
+    threads, onOpenLine, onResolve, onSend, onSetThreadModel, onDeleteThread, onNavigateCard, onOpenInEditor,
     // #8/#9 shared contract — set of threadId with an arrived AI reply that has
     // not yet been read (read = expanding that thread). App owns the set; when it
     // doesn't pass one yet, default to an empty Set so `.has(...)` stays safe.
@@ -119,8 +198,9 @@ export default function ReviewScreen(props) {
 
   // ---- Build aligned split rows (before | after) from the unified line list.
   const rows = React.useMemo(() => {
-    const start = (card.lines[0] && card.lines[0].n) || 1;
-    let oldNo = start, newNo = start;
+    // Use the engine's per-line number (`ln.n` — the real new-file gutter) AS IS.
+    // Re-deriving it from a single start drifted from the actual file line numbers
+    // (e.g. when a card starts with deleted lines), which also threw off ⌘-click.
     const out = [];
     let pendDel = [], pendAdd = [];
     const flush = () => {
@@ -129,9 +209,9 @@ export default function ReviewScreen(props) {
       pendDel = []; pendAdd = [];
     };
     card.lines.forEach((ln) => {
-      if (ln.t === 'ctx') { flush(); out.push({ kind: 'ctx', left: { n: oldNo++, c: ln.c }, right: { n: newNo++, c: ln.c } }); }
-      else if (ln.t === 'del') pendDel.push({ n: oldNo++, c: ln.c });
-      else if (ln.t === 'add') pendAdd.push({ n: newNo++, c: ln.c });
+      if (ln.t === 'ctx') { flush(); out.push({ kind: 'ctx', left: { n: ln.n, c: ln.c }, right: { n: ln.n, c: ln.c } }); }
+      else if (ln.t === 'del') pendDel.push({ n: ln.n, c: ln.c });
+      else if (ln.t === 'add') pendAdd.push({ n: ln.n, c: ln.c });
     });
     flush();
     return out;
@@ -145,6 +225,15 @@ export default function ReviewScreen(props) {
   const [dragTo, setDragTo] = React.useState(null);
   const [hover, setHover] = React.useState(null); // { side, r }
   const dragging = dragFrom != null;
+  // Brief "pressed" flash on the ⌘-clicked cell — only the side (before/after)
+  // you actually clicked, not both. Holds { r, side } | null.
+  const [flashRow, setFlashRow] = React.useState(null);
+  const flashTimer = React.useRef(0);
+  const pressRow = React.useCallback((r, side) => {
+    setFlashRow({ r, side });
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setFlashRow(null), 220);
+  }, []);
   const inRange = (i) => dragging &&
     i >= Math.min(dragFrom, dragTo) && i <= Math.max(dragFrom, dragTo);
   const endDrag = () => {
@@ -236,6 +325,12 @@ export default function ReviewScreen(props) {
     else localStorage.setItem('loupe.codeFontSize', String(v));
   };
   const codeFs = codeFontSize != null ? codeFontSize : autoFs;
+  // ⌘/Ctrl + wheel over the code view zooms the font. The wheel listener is bound
+  // per card, so it reads the live size via a ref; the accumulator smooths trackpad
+  // deltas so one notch ≈ one step.
+  const effFontRef = React.useRef(codeFs);
+  effFontRef.current = codeFs;
+  const fontWheelAccum = React.useRef(0);
 
   // ---- No-wrap horizontal scroll ----
   // Lines no longer wrap; the diff scrolls left/right. To keep both columns
@@ -355,6 +450,20 @@ export default function ReviewScreen(props) {
     const el = diffRef.current;
     if (!el) return;
     const onWheel = (e) => {
+      // ⌘/Ctrl + wheel → zoom the code font (up = larger), not scroll.
+      if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+        fontWheelAccum.current += e.deltaY;
+        const STEP = 30;
+        if (Math.abs(fontWheelAccum.current) >= STEP) {
+          const dir = fontWheelAccum.current < 0 ? 1 : -1;
+          fontWheelAccum.current = 0;
+          const cur = Math.round(effFontRef.current);
+          const next = Math.max(8, Math.min(20, cur + dir));
+          if (next !== cur) setFont(next);
+        }
+        return;
+      }
       if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return; // vertical → container scrolls
       const half = e.target.closest && e.target.closest('[data-side]');
       const side = half && half.getAttribute('data-side');
@@ -573,13 +682,14 @@ export default function ReviewScreen(props) {
 
   // one side (old/new) of a split row. Selection highlight is row-wide; the
   // + affordance and a collapsed thread's badge are per-side (this column).
-  const Half = ({ cell, kind, side, r, active, isFirst, isLast, thread, region, regFirst, regLast }) => {
+  const Half = ({ cell, kind, side, r, active, isFirst, isLast, thread, region, regFirst, regLast, navLine, flash }) => {
     const isChange = kind === 'change';
     const tone = side === 'old' ? 'del' : 'add';
     const filled = !!cell;
     const showPlus = filled && !thread && ((!dragging && hover && hover.side === side && hover.r === r)
       || (dragging && dragSide === side && dragTo === r));
-    const bg = active ? 'rgba(110, 139, 255, 0.20)'
+    const bg = flash ? 'rgba(110, 139, 255, 0.22)'
+      : active ? 'rgba(110, 139, 255, 0.20)'
       : (region ? 'rgba(110, 139, 255, 0.09)'
         : (isChange && filled ? `var(--diff-${tone}-bg)`
           : (isChange && !filled ? 'rgba(255,255,255,0.014)' : 'transparent')));
@@ -607,7 +717,17 @@ export default function ReviewScreen(props) {
     const handlers = filled ? {
       onMouseEnter: () => { if (dragging) { setDragTo(r); } else { setHover({ side, r }); } },
       onMouseLeave: () => { if (!dragging) setHover((h) => (h && h.side === side && h.r === r ? null : h)); },
-      onMouseDown: (e) => { if (!thread) { e.preventDefault(); setDragSide(side); setDragFrom(r); setDragTo(r); } },
+      // ⌘/Ctrl held → open in editor immediately (on mousedown, the most reliable
+      // signal in the webview), NOT a drag-to-comment.
+      onMouseDown: (e) => {
+        if (e.metaKey || e.ctrlKey) {
+          e.preventDefault(); e.stopPropagation();
+          pressRow(r, side);
+          if (onOpenInEditor && navLine) onOpenInEditor(card.path, navLine);
+        }
+        // A plain click on a line does nothing — threads start ONLY from the
+        // hover "+" button (click for one line, drag for a range).
+      },
     } : {};
     return (
       <div {...handlers} style={{ position: 'relative', display: 'grid', gridTemplateColumns: '10px 30px 12px 1fr',
@@ -812,6 +932,8 @@ export default function ReviewScreen(props) {
                 const region = !dragging && openRegionRows.has(r);
                 const regFirst = region && !openRegionRows.has(r - 1);
                 const regLast = region && !openRegionRows.has(r + 1);
+                // New-file line for ⌘-click → open-in-editor (after side; deletion → before).
+                const navLine = (row.right && row.right.n) || (row.left && row.left.n);
                 // A row's measured height must include any open/collapsed thread that
                 // renders directly beneath it, so the measuring ref wraps both. The
                 // wrapper is a plain block (no flex/grid/height) — it does not alter
@@ -821,10 +943,12 @@ export default function ReviewScreen(props) {
                     <div data-line={r} style={{ display: 'flex', minWidth: 0 }}>
                       <Half cell={row.left} kind={row.kind} side="old" r={r}
                         active={active} isFirst={isFirst} isLast={isLast} thread={thread}
-                        region={region} regFirst={regFirst} regLast={regLast} />
+                        region={region} regFirst={regFirst} regLast={regLast} navLine={navLine}
+                        flash={!!(flashRow && flashRow.r === r && flashRow.side === 'old')} />
                       <Half cell={row.right} kind={row.kind} side="new" r={r}
                         active={active} isFirst={isFirst} isLast={isLast} thread={thread}
-                        region={region} regFirst={regFirst} regLast={regLast} />
+                        region={region} regFirst={regFirst} regLast={regLast} navLine={navLine}
+                        flash={!!(flashRow && flashRow.r === r && flashRow.side === 'new')} />
                     </div>
                     {thread && thread.open && (
                       <div ref={(el) => { if (el) threadEls.current[thread.id] = el; }}
@@ -910,6 +1034,7 @@ export default function ReviewScreen(props) {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
             <TextSizeMenu size={codeFontSize} effective={autoFs} onChange={setFont} />
+            <OpenInEditorMenu />
             <span style={{ width: 1, height: 16, background: 'var(--border-subtle)' }} />
             <div style={{ display: 'flex', alignItems: 'center', gap: 18, opacity: 'var(--dim-rest)' }}>
               <KeyHint keys={['←', '→']} label="Move" size="sm" />

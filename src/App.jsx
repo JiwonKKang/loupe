@@ -304,6 +304,31 @@ export default function App() {
     changeProject({ repoPath: rp, base: b, target: t });
   }, [pendingCli, token, changeProject]);
 
+  // Open the analyzed project in an external editor (IntelliJ / VS Code) at
+  // file:line — cmd/ctrl-click on a diff line. `file` is repo-relative; the Rust
+  // side joins it onto repoPath and opens the whole project, then navigates.
+  // `loupe.editor` (localStorage): 'auto' | 'idea' | 'code'.
+  const [editorMsg, setEditorMsg] = React.useState(null);
+  const editorMsgTimer = React.useRef(null);
+  const openInEditor = React.useCallback((file, line, editorOverride) => {
+    if (!repoPath || !file) return;
+    let editor = editorOverride || null;
+    if (editor) {
+      // explicit pick from the header chooser → remember as the new default.
+      try { window.localStorage.setItem('loupe.editor', editor); } catch { /* ignore */ }
+    } else {
+      try { editor = window.localStorage.getItem('loupe.editor') || 'idea'; } catch { editor = 'idea'; }
+    }
+    const ln = Math.max(1, Math.floor(line) || 1);
+    // Silent on success; only surface a toast if the editor couldn't be launched.
+    invoke('open_in_editor', { editor, repoPath, file, line: ln })
+      .catch((e) => {
+        setEditorMsg(String(e));
+        if (editorMsgTimer.current) clearTimeout(editorMsgTimer.current);
+        editorMsgTimer.current = setTimeout(() => setEditorMsg(null), 6000);
+      });
+  }, [repoPath]);
+
   // Onboarding finished → persist the token, then go pick a project. A save
   // failure keeps the user on onboarding with the error surfaced.
   const [onboardError, setOnboardError] = React.useState(null);
@@ -777,6 +802,7 @@ export default function App() {
           onOpenLine={openLine} onResolve={resolveThread} onSend={sendThread}
           onSetThreadModel={setThreadModel} onDeleteThread={deleteThread}
           onNavigateCard={(n) => { const i = Number(n) - 1; if (i >= 0 && i < list.length) goTo(i, i > index ? 1 : -1); }}
+          onOpenInEditor={openInEditor}
         />
       )}
       {screen === 'summary' && (
@@ -785,6 +811,17 @@ export default function App() {
       )}
 
       <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
+
+      {/* transient toast — e.g. when the editor CLI launcher isn't installed */}
+      {editorMsg && (
+        <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 200, maxWidth: 520, padding: '10px 14px', borderRadius: 'var(--radius-md)',
+          background: 'var(--surface-overlay)', border: '1px solid var(--flag-line)',
+          boxShadow: 'var(--shadow-pop)', color: 'var(--text-secondary)',
+          font: 'var(--text-sm)/1.4 var(--font-ui)' }}>
+          {editorMsg}
+        </div>
+      )}
     </React.Fragment>
   );
 }

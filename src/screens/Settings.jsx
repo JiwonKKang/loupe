@@ -14,6 +14,14 @@ export default function Settings({ connected = false, onBack, onSaved, onCleared
   const [busy, setBusy] = React.useState(false);
   // status: { tone: 'ok' | 'err', text } | null
   const [status, setStatus] = React.useState(null);
+  // Preferred editor for ⌘-click "open in editor" (localStorage). 'auto' tries code then idea.
+  const [editor, setEditor] = React.useState(() => {
+    try { return window.localStorage.getItem('loupe.editor') || 'idea'; } catch { return 'idea'; }
+  });
+  const pickEditor = (v) => {
+    setEditor(v);
+    try { window.localStorage.setItem('loupe.editor', v); } catch { /* ignore */ }
+  };
 
   const Ico = ({ d, w = 16 }) => (
     <svg width={w} height={w} viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -129,6 +137,25 @@ export default function Settings({ connected = false, onBack, onSaved, onCleared
               color: status.tone === 'ok' ? 'var(--pass)' : 'var(--flag)',
               textAlign: 'right', maxWidth: 220 }}>{status.text}</span>
           )}
+        </div>
+
+        {/* Open-in-editor preference — ⌘-click a diff line opens the project here. */}
+        <div style={{ marginTop: 26, paddingTop: 22, borderTop: '1px solid var(--border-subtle)' }}>
+          <label style={labelStyle}>Open in editor — ⌘-click a diff line</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[['auto', 'Auto'], ['idea', 'IntelliJ'], ['code', 'VS Code']].map(([v, l]) => (
+              <button key={v} onClick={() => pickEditor(v)} style={{
+                flex: 1, height: 36, borderRadius: 'var(--radius-md)', cursor: 'pointer',
+                background: editor === v ? 'var(--accent-dim)' : 'var(--surface-inset)',
+                border: `1px solid ${editor === v ? 'var(--accent-line)' : 'var(--border-default)'}`,
+                color: editor === v ? 'var(--accent)' : 'var(--text-secondary)',
+                font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
+                transition: 'var(--t-hover)' }}>{l}</button>
+            ))}
+          </div>
+          <div style={{ marginTop: 9, font: 'var(--text-xs)/1.5 var(--font-ui)', color: 'var(--text-faint)' }}>
+            에디터 CLI 런처가 필요해요 — VS Code: “Shell Command: Install ‘code’”, IntelliJ: “Tools › Create Command-line Launcher”.
+          </div>
         </div>
       </div>
     </div>

@@ -103,7 +103,7 @@ const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 /// "claude CLI not found". (In `tauri dev` it works only because the dev process
 /// inherited the terminal's full PATH.) Merge the inherited PATH with the usual
 /// CLI install locations so the installed app resolves `claude` the same way.
-fn augmented_path() -> String {
+pub fn augmented_path() -> String {
     let mut dirs: Vec<String> = Vec::new();
     let mut push = |d: String| {
         if !d.is_empty() && !dirs.iter().any(|x| x == &d) {
