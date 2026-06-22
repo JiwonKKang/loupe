@@ -885,6 +885,21 @@ export default function ReviewScreen(props) {
           <div style={{ position: 'relative', width: cardW, maxWidth: '100%',
             maxHeight: '100%', display: 'flex' }}>
 
+          {/* Cluster progress (design system) — a soft luminous line along the card's
+              TOP edge that grows left→right with the position in the cluster (pos/of),
+              feathered at both ends so it glows out of the edge instead of cutting off. */}
+          {clusterIndex && clusterIndex.of >= 1 && (
+            <div aria-hidden="true" style={{ position: 'absolute', top: 1,
+              left: 'var(--radius-card)', right: 'var(--radius-card)', height: 1,
+              zIndex: 5, pointerEvents: 'none' }}>
+              <div style={{ height: '100%', borderRadius: 999,
+                width: (Math.max(0, Math.min(1, clusterIndex.pos / clusterIndex.of)) * 100) + '%',
+                background: 'linear-gradient(90deg, rgba(231,236,245,0) 0%, rgba(231,236,245,0.4) 35%, rgba(231,236,245,0.8) 90%, rgba(231,236,245,0) 100%)',
+                boxShadow: '0 0 7px 0 rgba(200,220,255,0.46)',
+                transition: 'width 0.6s var(--ease-out)' }} />
+            </div>
+          )}
+
           <div key={card.id} style={{
             position: 'relative', zIndex: 3,
             width: '100%', maxHeight: '100%', display: 'flex', flexDirection: 'column',
@@ -926,27 +941,8 @@ export default function ReviewScreen(props) {
                     direction: 'rtl', textAlign: 'right' }}>
                   {pathFull ? card.path : middlePath(card.path)}</span>
               </div>
-              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 20 }}>
-                <div style={{ flex: 1, minWidth: 0, font: 'var(--text-sm)/var(--leading-normal) var(--font-ui)',
-                  color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.aiSummary || card.summary}</div>
-                {/* cluster progress — one segment per card in the cluster: done = dim
-                    white, current = full white (wider), upcoming = strong border. Shown
-                    for every cluster, including 1-card ones (a single current segment). */}
-                {clusterIndex && clusterIndex.of >= 1 && (
-                  <div style={{ flex: 'none', display: 'flex', alignItems: 'flex-end', gap: 4, marginBottom: 3 }}>
-                    {Array.from({ length: clusterIndex.of }).map((_, i) => {
-                      const done = i < clusterIndex.pos - 1;
-                      const cur = i === clusterIndex.pos - 1;
-                      return (
-                        <span key={i} style={{ width: cur ? 13 : 8, height: 3, borderRadius: 999,
-                          background: done || cur ? 'var(--text-primary)' : 'var(--border-strong)',
-                          opacity: done ? 0.45 : 1,
-                          transition: 'width var(--dur-base) var(--ease-soft), background var(--dur-base) var(--ease-soft), opacity var(--dur-base) var(--ease-soft)' }} />
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+              <div style={{ font: 'var(--text-sm)/var(--leading-normal) var(--font-ui)',
+                color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.aiSummary || card.summary}</div>
             </div>
 
             {/* hidden monospace sizer — measures one char at the current size */}
