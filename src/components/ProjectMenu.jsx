@@ -87,7 +87,10 @@ function BranchSelect({ value, options, onChange, fieldStyle, loading = false })
   return (
     <React.Fragment>
       <button ref={trigRef} onClick={toggle} type="button"
+        onMouseEnter={(e) => { if (!open) { e.currentTarget.style.borderColor = 'var(--border-strong)'; e.currentTarget.style.background = 'var(--surface-overlay)'; } }}
+        onMouseLeave={(e) => { if (!open) { e.currentTarget.style.borderColor = 'var(--border-default)'; e.currentTarget.style.background = fieldStyle.background; } }}
         style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 6, textAlign: 'left',
+          transition: 'border-color var(--dur-fast) var(--ease-soft), background var(--dur-fast) var(--ease-soft)',
           color: open ? 'var(--text-primary)' : fieldStyle.color,
           borderColor: open ? 'var(--border-strong)' : 'var(--border-default)' }}>
         <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
@@ -388,22 +391,30 @@ export default function ProjectMenu({
             <label style={{ ...labelStyle, marginTop: 8 }}>Project</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 1, marginBottom: 6 }}>
               {recents.slice(0, 4).map((r) => (
-                <button key={r} onClick={() => pickRecent(r)} title={r} style={{
+                <button key={r} onClick={() => pickRecent(r)} title={r}
+                  onMouseEnter={(e) => { if (repoPath !== r) { e.currentTarget.style.background = 'var(--surface-inset)'; e.currentTarget.style.color = 'var(--text-primary)'; } }}
+                  onMouseLeave={(e) => { if (repoPath !== r) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-secondary)'; } }}
+                  style={{
                   display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
                   borderRadius: 'var(--radius-sm)', cursor: 'pointer', textAlign: 'left',
                   background: repoPath === r ? 'var(--accent-dim)' : 'transparent',
                   border: `1px solid ${repoPath === r ? 'var(--accent-line)' : 'transparent'}`,
                   font: '12px/1 var(--font-mono)',
+                  transition: 'background var(--dur-fast) var(--ease-soft), color var(--dur-fast) var(--ease-soft)',
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   color: repoPath === r ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
                   <span style={{ color: repoPath === r ? 'var(--accent)' : 'var(--text-faint)', display: 'inline-flex', flex: 'none' }}><Ico d={folder} w={12} /></span>
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(r)}</span>
                 </button>
               ))}
-              <button onClick={browse} disabled={picking} style={{
+              <button onClick={browse} disabled={picking}
+                onMouseEnter={(e) => { if (!picking) { e.currentTarget.style.background = 'var(--surface-inset)'; e.currentTarget.style.color = 'var(--text-secondary)'; } }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+                style={{
                 display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
                 borderRadius: 'var(--radius-sm)', cursor: picking ? 'default' : 'pointer', textAlign: 'left',
                 background: 'transparent', border: '1px solid transparent',
+                transition: 'background var(--dur-fast) var(--ease-soft), color var(--dur-fast) var(--ease-soft)',
                 font: '12px/1 var(--font-ui)', color: 'var(--text-tertiary)' }}>
                 <span style={{ display: 'inline-flex', flex: 'none' }}><Ico d="M12 5v14M5 12h14" w={12} /></span>
                 {picking ? 'Opening…' : 'Browse…'}
