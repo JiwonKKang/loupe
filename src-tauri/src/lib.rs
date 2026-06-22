@@ -566,6 +566,31 @@ fn run_gh(repo_path: &str, args: &[&str]) -> Result<std::process::Output, String
         })
 }
 
+/// Strip a remote prefix (`origin/`, `upstream/`, …) from a branch so `gh` matches the
+/// PR's HEAD branch name. The review can be run against remote-tracking refs (e.g.
+/// `origin/feature-x`), but a PR's head branch on GitHub is the plain name
+/// (`feature-x`). We only strip a leading segment that is an ACTUAL remote, so a real
+/// branch like `feature/x` is left intact.
+fn pr_branch_name(repo_path: &str, branch: &str) -> String {
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["-C", repo_path, "remote"])
+        .env("PATH", engine::ai::cli::augmented_path())
+        .output()
+    {
+        if out.status.success() {
+            for r in String::from_utf8_lossy(&out.stdout).lines() {
+                let r = r.trim();
+                if !r.is_empty() {
+                    if let Some(rest) = branch.strip_prefix(&format!("{r}/")) {
+                        return rest.to_string();
+                    }
+                }
+            }
+        }
+    }
+    branch.to_string()
+}
+
 /// Translate a non-zero `gh` stderr into a specific, friendly message.
 fn gh_error(stderr: &str) -> String {
     let s = stderr.to_lowercase();
@@ -599,6 +624,7 @@ fn is_no_pr(stderr: &str) -> bool {
 #[tauri::command]
 async fn pr_status(repo_path: String, target: String) -> Result<Option<PrInfo>, String> {
     tokio::task::spawn_blocking(move || {
+        let target = pr_branch_name(&repo_path, &target); // drop any origin/ prefix for gh
         let out = run_gh(&repo_path, &["pr", "view", &target, "--json", "number,url,state,title"])?;
         if out.status.success() {
             return Ok(Some(parse_pr(&String::from_utf8_lossy(&out.stdout))?));
@@ -624,6 +650,7 @@ async fn approve_pr(
     body: Option<String>,
 ) -> Result<PrInfo, String> {
     tokio::task::spawn_blocking(move || {
+        let target = pr_branch_name(&repo_path, &target); // drop any origin/ prefix for gh
         // Resolve + validate the PR first — precise errors + the info the UI confirmed.
         let view = run_gh(&repo_path, &["pr", "view", &target, "--json", "number,url,state,title"])?;
         if !view.status.success() {
