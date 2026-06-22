@@ -14,13 +14,15 @@ pub struct Branches {
     pub branches: Vec<String>,
     /// HEAD shorthand, or `None` when detached.
     pub current: Option<String>,
-    /// First of main/master/develop that actually exists — a sensible base default.
+    /// First of develop/main/master that actually exists — a sensible base default.
     pub default: Option<String>,
 }
 
 /// Preference order so the dropdown surfaces the usual base branches up top;
-/// everything else falls back to case-insensitive alphabetical.
-const PREFERRED: [&str; 3] = ["main", "master", "develop"];
+/// everything else falls back to case-insensitive alphabetical. `develop` is first
+/// (highest priority) so gitflow repos default the review base to the integration
+/// branch rather than the release branch.
+const PREFERRED: [&str; 3] = ["develop", "main", "master"];
 
 /// Open `repo_path` and enumerate its local branches.
 pub fn list_branches(repo_path: &str) -> Result<Branches, EngineError> {
@@ -56,7 +58,7 @@ pub fn list_branches(repo_path: &str) -> Result<Branches, EngineError> {
     })
 }
 
-/// Sort so the current branch is first, then main/master/develop, then the rest
+/// Sort so the current branch is first, then develop/main/master, then the rest
 /// case-insensitively. Stable + total so the dropdown order is deterministic.
 fn sort_branches(names: &mut [String], current: Option<&str>) {
     names.sort_by(|a, b| {

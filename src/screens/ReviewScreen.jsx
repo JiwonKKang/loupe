@@ -823,29 +823,33 @@ export default function ReviewScreen(props) {
             The cluster title is the orienting label, so it reads clearly (not dimmed).
             Doubles as the window's drag handle (overlay title bar has no chrome). */}
         <div data-tauri-drag-region style={{ display: 'flex', alignItems: 'center', justifyContent: 'center',
-          gap: 10, padding: '34px 0 6px' }}>
+          gap: 10, padding: '34px 0 6px', userSelect: 'none', cursor: 'default' }}>
+          {/* content is pointerEvents:none so a mousedown ANYWHERE on the bar lands on
+              the drag-region element itself — reliable window drag (not a text selection
+              on the title, which was why dragging "sometimes" did nothing). */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, pointerEvents: 'none' }}>
           <span style={{ color: 'var(--text-tertiary)', fontVariantNumeric: 'tabular-nums',
-            font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)',
+            font: 'var(--weight-medium) var(--text-base)/1 var(--font-ui)',
             letterSpacing: 'var(--tracking-wide)', opacity: 'var(--dim-rest)' }}>
             {String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}
           </span>
-          <span style={{ width: 3, height: 3, borderRadius: 999, background: 'var(--text-faint)' }} />
+          <span style={{ width: 4, height: 4, borderRadius: 999, background: 'var(--text-faint)' }} />
           {cluster ? (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
-              <span style={{ width: 6, height: 6, borderRadius: 999, flex: 'none',
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, flex: 'none',
                 background: cluster.id === '__unclustered' ? 'var(--text-faint)' : 'var(--accent)' }} />
-              <span style={{ maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                font: 'var(--weight-semibold) var(--text-base)/1.2 var(--font-ui)',
+              <span style={{ maxWidth: 560, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                font: 'var(--weight-semibold) var(--text-md)/1.2 var(--font-ui)',
                 color: 'var(--text-primary)', letterSpacing: 'var(--tracking-snug)' }}>{cluster.title}</span>
               {clusterIndex && clusterIndex.of > 1 && (
                 <span style={{ flex: 'none', fontVariantNumeric: 'tabular-nums',
-                  font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-faint)',
+                  font: 'var(--text-sm)/1 var(--font-ui)', color: 'var(--text-faint)',
                   letterSpacing: 'var(--tracking-wide)' }}>{clusterIndex.pos}/{clusterIndex.of}</span>
               )}
             </span>
           ) : (
-            <span style={{ maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)', color: 'var(--text-secondary)',
+            <span style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              font: 'var(--weight-medium) var(--text-base)/1 var(--font-ui)', color: 'var(--text-secondary)',
               opacity: 'var(--dim-rest)' }}>{card.chapter}</span>
           )}
           {analysisState === 'clustering' && (
@@ -856,6 +860,7 @@ export default function ReviewScreen(props) {
               clustering…
             </span>
           )}
+          </div>
         </div>
 
         {/* Centered card — responsive width, deep shadow (no deck).
@@ -873,6 +878,10 @@ export default function ReviewScreen(props) {
           <NavArrow side="left" d={chevL} disabled={!hasPrev} onClick={onPrev} label="Previous card" />
           <NavArrow side="right" d={chevR} disabled={false} onClick={onNext} label="Next card" />
 
+          {/* The card grows with its CONTENT (code length), capped at maxHeight:100% (the
+              card-area height minus its 24px padding). Short diffs => short card (centered);
+              tall diffs => fills the available height and the inner diff scroller scrolls.
+              NOT force-stretched — a 28-line diff must not become a full-height empty card. */}
           <div style={{ position: 'relative', width: cardW, maxWidth: '100%',
             maxHeight: '100%', display: 'flex' }}>
 
@@ -917,8 +926,27 @@ export default function ReviewScreen(props) {
                     direction: 'rtl', textAlign: 'right' }}>
                   {pathFull ? card.path : middlePath(card.path)}</span>
               </div>
-              <div style={{ font: 'var(--text-sm)/var(--leading-normal) var(--font-ui)',
-                color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.aiSummary || card.summary}</div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 20 }}>
+                <div style={{ flex: 1, minWidth: 0, font: 'var(--text-sm)/var(--leading-normal) var(--font-ui)',
+                  color: 'var(--text-secondary)', textWrap: 'pretty' }}>{card.aiSummary || card.summary}</div>
+                {/* cluster progress — one segment per card in the cluster: done = dim
+                    white, current = full white (wider), upcoming = strong border. Shown
+                    for every cluster, including 1-card ones (a single current segment). */}
+                {clusterIndex && clusterIndex.of >= 1 && (
+                  <div style={{ flex: 'none', display: 'flex', alignItems: 'flex-end', gap: 4, marginBottom: 3 }}>
+                    {Array.from({ length: clusterIndex.of }).map((_, i) => {
+                      const done = i < clusterIndex.pos - 1;
+                      const cur = i === clusterIndex.pos - 1;
+                      return (
+                        <span key={i} style={{ width: cur ? 13 : 8, height: 3, borderRadius: 999,
+                          background: done || cur ? 'var(--text-primary)' : 'var(--border-strong)',
+                          opacity: done ? 0.45 : 1,
+                          transition: 'width var(--dur-base) var(--ease-soft), background var(--dur-base) var(--ease-soft), opacity var(--dur-base) var(--ease-soft)' }} />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* hidden monospace sizer — measures one char at the current size */}

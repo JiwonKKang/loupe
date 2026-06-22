@@ -354,6 +354,45 @@ export default function App() {
   );
   const card = list[index];
 
+  // --- GitHub PR approval (summary screen, all-pass) ---------------------------
+  // Delegated to the user's `gh` CLI (Loupe makes no GitHub calls of its own). The
+  // PR is queried ONLY when the review actually ended all-pass — and approval only
+  // ever fires from an explicit click in SummaryScreen (never automatically here).
+  const allPass = list.length > 0
+    && list.every((c) => verdicts[c.id] === 'pass')
+    && threads.every((t) => t.resolved);
+  // prStatus.state: 'unknown' | 'loading' | 'open' | 'none' | 'error' (+ PrInfo fields when 'open')
+  const [prStatus, setPrStatus] = React.useState({ state: 'unknown' });
+  const [approveState, setApproveState] = React.useState('idle'); // idle | approving | approved | error
+  React.useEffect(() => {
+    setApproveState('idle');
+    if (screen !== 'summary' || !allPass || !repoPath || !target) { setPrStatus({ state: 'unknown' }); return; }
+    let alive = true;
+    setPrStatus({ state: 'loading' });
+    invoke('pr_status', { repoPath, target })
+      // The PR info is NESTED under `pr` so gh's own uppercase `state` field
+      // (OPEN/MERGED/CLOSED) never overwrites our wrapper `state`. Only an OPEN PR is
+      // approvable; a merged/closed one shows as 'closed' (no button).
+      .then((info) => {
+        if (!alive) return;
+        if (!info) { setPrStatus({ state: 'none' }); return; }
+        setPrStatus({ state: info.state === 'OPEN' ? 'open' : 'closed', pr: info });
+      })
+      .catch(() => { if (alive) setPrStatus({ state: 'error' }); });
+    return () => { alive = false; };
+  }, [screen, allPass, repoPath, target]);
+  const approvePr = React.useCallback((body) => {
+    setApproveState('approving');
+    invoke('approve_pr', { repoPath, target, body: body || null })
+      .then((info) => { setApproveState('approved'); setPrStatus({ state: 'open', pr: info }); })
+      .catch((e) => {
+        setApproveState('error');
+        setEditorMsg(String(e));
+        if (editorMsgTimer.current) clearTimeout(editorMsgTimer.current);
+        editorMsgTimer.current = setTimeout(() => setEditorMsg(null), 6000);
+      });
+  }, [repoPath, target]);
+
   // cluster id -> its title/kind, for spine grouping + the card's cluster band.
   const clusterById = React.useMemo(() => {
     const m = new Map();
@@ -808,6 +847,7 @@ export default function App() {
       {screen === 'summary' && (
         <SummaryScreen cards={list} verdicts={verdicts} threads={threads}
           project={repoPath} base={base} target={target} onChangeProject={changeProject}
+          prStatus={prStatus} approveState={approveState} onApprovePr={approvePr}
           onRestart={() => { setIndex(0); setDir(1); setScreen('review'); }} />
       )}
 

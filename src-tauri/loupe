@@ -3,7 +3,7 @@
 #
 #   loupe [path] [base] [target]
 #     path    git repo (or any dir inside one); default: current directory
-#     base    base branch;   default: first of main/master/develop, else target
+#     base    base branch;   default: first of develop/main/master, else target
 #     target  compare branch; default: current branch (HEAD)
 #
 # It resolves the range, then opens loupe://review?… which launches (or focuses)
@@ -18,7 +18,7 @@ repo=$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || {
 
 base="${2:-}"
 if [ -z "$base" ]; then
-  for b in main master develop; do
+  for b in develop main master; do
     if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then base="$b"; break; fi
   done
 fi

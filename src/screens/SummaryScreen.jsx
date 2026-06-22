@@ -8,14 +8,19 @@ import { KeyHint } from '../components/KeyHint';
 import ProjectMenu from '../components/ProjectMenu';
 
 export default function SummaryScreen(props) {
-  const { cards, verdicts, threads, onRestart, project, base, target, onChangeProject } = props;
+  const { cards, verdicts, threads, onRestart, project, base, target, onChangeProject,
+    prStatus, approveState, onApprovePr } = props;
   const [copied, setCopied] = React.useState(false);
+  // PR-approve is a two-step, explicit confirm (names the exact PR) — never one-click.
+  const [confirming, setConfirming] = React.useState(false);
 
   const passed = cards.filter((c) => verdicts[c.id] === 'pass').length;
   const open = threads.filter((t) => !t.resolved);
   // a card with unresolved threads IS the flag
   const flaggedCards = new Set(open.map((t) => t.cardId));
   const flagged = flaggedCards.size;
+  // All-pass = every card passed and no thread left open. Only then do we offer PR approval.
+  const allPass = cards.length > 0 && passed === cards.length && open.length === 0;
 
   // file:line reference for a thread
   const refOf = (t) => {
@@ -120,6 +125,68 @@ export default function SummaryScreen(props) {
             </div>
           ))}
         </div>
+
+        {/* PR approval — only on an ALL-PASS review, and only when an OPEN PR exists for
+            the reviewed branch. Delegated to the user's gh CLI; approving is an explicit
+            two-step confirm that names the exact PR (outward-facing, hard to reverse). */}
+        {allPass && prStatus && prStatus.state !== 'unknown' && (
+          <div style={{ marginTop: 28, padding: '16px 18px', borderRadius: 'var(--radius-lg)',
+            border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)' }}>
+            {prStatus.state === 'loading' && (
+              <div style={{ font: 'var(--text-sm)/1.4 var(--font-ui)', color: 'var(--text-tertiary)' }}>
+                PR 상태 확인 중…
+              </div>
+            )}
+            {prStatus.state === 'none' && (
+              <div style={{ font: 'var(--text-sm)/1.4 var(--font-ui)', color: 'var(--text-tertiary)' }}>
+                이 브랜치(<span style={{ font: 'var(--text-sm)/1 var(--font-mono)' }}>{target}</span>)에 열린 PR이 없어요.
+              </div>
+            )}
+            {prStatus.state === 'error' && (
+              <div style={{ font: 'var(--text-sm)/1.4 var(--font-ui)', color: 'var(--text-tertiary)' }}>
+                PR 상태를 확인할 수 없어요 — <span style={{ font: 'var(--text-sm)/1 var(--font-mono)' }}>gh</span> 설치/로그인(<span style={{ font: 'var(--text-sm)/1 var(--font-mono)' }}>gh auth login</span>)을 확인하세요.
+              </div>
+            )}
+            {prStatus.state === 'closed' && prStatus.pr && (
+              <div style={{ font: 'var(--text-sm)/1.4 var(--font-ui)', color: 'var(--text-tertiary)' }}>
+                PR #{prStatus.pr.number}는 이미 {prStatus.pr.state === 'MERGED' ? '머지' : '닫힌'}됐어요.
+              </div>
+            )}
+            {prStatus.state === 'open' && prStatus.pr && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12, minWidth: 0 }}>
+                  <span style={{ font: 'var(--weight-semibold) var(--text-base)/1 var(--font-mono)',
+                    color: 'var(--text-secondary)', flex: 'none' }}>#{prStatus.pr.number}</span>
+                  <span style={{ font: 'var(--text-base)/1.3 var(--font-ui)', color: 'var(--text-primary)',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prStatus.pr.title}</span>
+                </div>
+                {approveState === 'approved' ? (
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7,
+                    font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)', color: 'var(--pass)' }}>
+                    <Ico d={check} w={15} /> PR #{prStatus.pr.number} 승인됨
+                  </div>
+                ) : confirming ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                    <span style={{ font: 'var(--text-sm)/1.4 var(--font-ui)', color: 'var(--text-secondary)' }}>
+                      이 PR을 <b style={{ color: 'var(--text-primary)' }}>승인</b>할까요? 되돌리기 어려운 공개 작업이에요.
+                    </span>
+                    <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+                      <Button variant="ghost" size="sm" disabled={approveState === 'approving'}
+                        onClick={() => setConfirming(false)}>취소</Button>
+                      <Button variant="pass" size="sm" disabled={approveState === 'approving'}
+                        onClick={() => { onApprovePr && onApprovePr(); }}>
+                        {approveState === 'approving' ? '승인 중…' : `Approve #${prStatus.pr.number}`}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <Button variant="pass" size="sm" icon={<Ico d={check} w={14} />}
+                    onClick={() => setConfirming(true)}>Approve PR</Button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* verdict-by-card list */}
         <div style={{ marginTop: 34, display: 'flex', alignItems: 'center', gap: 14 }}>

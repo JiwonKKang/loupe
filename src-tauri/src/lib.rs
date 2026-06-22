@@ -535,6 +535,135 @@ fn open_in_editor(
     ))
 }
 
+// --- GitHub PR approval (summary screen, all-pass) -------------------------------
+// Loupe makes no network calls of its own — PR approval is delegated to the user's
+// `gh` CLI (same model as the `claude` CLI), so the app never handles GitHub creds.
+// `gh` infers the repo from the repo's remote because we run it with cwd = repo_path.
+
+#[derive(serde::Serialize)]
+struct PrInfo {
+    number: u64,
+    url: String,
+    state: String,
+    title: String,
+}
+
+/// Run `gh` in `repo_path` with the GUI-augmented PATH (so it resolves when the app
+/// was launched from Finder/Spotlight). Maps the "gh not installed" spawn error to a
+/// friendly message; the caller inspects the exit status/stderr for the rest.
+fn run_gh(repo_path: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    std::process::Command::new("gh")
+        .args(args)
+        .current_dir(repo_path)
+        .env("PATH", engine::ai::cli::augmented_path())
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "GitHub CLI(gh)를 찾을 수 없어요 — `brew install gh` 후 `gh auth login` 하세요.".into()
+            } else {
+                format!("gh 실행 실패: {e}")
+            }
+        })
+}
+
+/// Translate a non-zero `gh` stderr into a specific, friendly message.
+fn gh_error(stderr: &str) -> String {
+    let s = stderr.to_lowercase();
+    if s.contains("gh auth login") || s.contains("not logged") || s.contains("authentication") {
+        "GitHub CLI에 로그인돼 있지 않아요 — 터미널에서 `gh auth login` 후 다시 시도하세요.".into()
+    } else if s.contains("no git remotes") || s.contains("none of the git remotes") {
+        "이 저장소에 GitHub 원격(remote)이 없어요.".into()
+    } else {
+        format!("gh 오류: {}", stderr.trim())
+    }
+}
+
+fn parse_pr(stdout: &str) -> Result<PrInfo, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("gh 응답 파싱 실패: {e}"))?;
+    Ok(PrInfo {
+        number: v.get("number").and_then(|x| x.as_u64()).unwrap_or(0),
+        url: v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        state: v.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        title: v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    })
+}
+
+fn is_no_pr(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("no pull requests found") || s.contains("no open pull requests")
+}
+
+/// The PR (if any) for the reviewed branch. `Ok(None)` = no PR for this branch, so the
+/// UI hides the Approve action. Used to gate + label the summary-screen Approve button.
+#[tauri::command]
+async fn pr_status(repo_path: String, target: String) -> Result<Option<PrInfo>, String> {
+    tokio::task::spawn_blocking(move || {
+        let out = run_gh(&repo_path, &["pr", "view", &target, "--json", "number,url,state,title"])?;
+        if out.status.success() {
+            return Ok(Some(parse_pr(&String::from_utf8_lossy(&out.stdout))?));
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if is_no_pr(&stderr) {
+            Ok(None)
+        } else {
+            Err(gh_error(&stderr))
+        }
+    })
+    .await
+    .map_err(|e| format!("PR 조회 작업이 패닉했어요: {e}"))?
+}
+
+/// Approve the GitHub PR for `target` via `gh pr review <branch> --approve`. Validates
+/// the PR first (so the message names it and merged/closed PRs are rejected). This is
+/// ONLY ever invoked by an explicit user click on the all-pass summary screen.
+#[tauri::command]
+async fn approve_pr(
+    repo_path: String,
+    target: String,
+    body: Option<String>,
+) -> Result<PrInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        // Resolve + validate the PR first — precise errors + the info the UI confirmed.
+        let view = run_gh(&repo_path, &["pr", "view", &target, "--json", "number,url,state,title"])?;
+        if !view.status.success() {
+            let stderr = String::from_utf8_lossy(&view.stderr);
+            if is_no_pr(&stderr) {
+                return Err(format!("이 브랜치({target})에 열린 PR이 없어요."));
+            }
+            return Err(gh_error(&stderr));
+        }
+        let pr = parse_pr(&String::from_utf8_lossy(&view.stdout))?;
+        match pr.state.as_str() {
+            "MERGED" => return Err(format!("이미 머지된 PR이에요 (#{}) — 승인할 수 없어요.", pr.number)),
+            "CLOSED" => return Err(format!("닫힌 PR이에요 (#{}).", pr.number)),
+            _ => {}
+        }
+        let body_str = body.unwrap_or_default();
+        let body_trimmed = body_str.trim();
+        let mut args: Vec<&str> = vec!["pr", "review", &target, "--approve"];
+        if !body_trimmed.is_empty() {
+            args.push("--body");
+            args.push(body_trimmed);
+        }
+        let out = run_gh(&repo_path, &args)?;
+        if out.status.success() {
+            return Ok(pr);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let s = stderr.to_lowercase();
+        if s.contains("already approved") {
+            return Ok(pr); // idempotent — already approved reads as success
+        }
+        if s.contains("approve your own") {
+            return Err("본인이 올린 PR은 승인할 수 없어요.".into());
+        }
+        Err(gh_error(&stderr))
+    })
+    .await
+    .map_err(|e| format!("PR 승인 작업이 패닉했어요: {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -560,7 +689,9 @@ pub fn run() {
             clear_token,
             load_threads,
             save_threads,
-            open_in_editor
+            open_in_editor,
+            pr_status,
+            approve_pr
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

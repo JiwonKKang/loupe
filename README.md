@@ -45,6 +45,8 @@ does that reordering for you:
   the app opens and starts the review (and remembers it in recents).
 - 🔎 **Fast project switching** — branch picker with live search; recent projects.
 - 🔍 **`⌘ + scroll`** to zoom the code; adaptive font that fits the change.
+- ✅ **Approve the PR** — when a review ends all-pass, approve the GitHub PR straight
+  from the summary screen (delegated to your `gh` CLI; explicit two-step confirm).
 - 🗄️ **SHA-cached** — re-opening an unchanged range is instant (no AI re-spend).
 
 ## Requirements
@@ -54,6 +56,8 @@ does that reordering for you:
   — Loupe shells out to `claude` for all AI work.
 - A **Claude setup-token**: run `claude setup-token` and paste it into Loupe once
   (stored locally on your Mac, `chmod 600`, never logged).
+- *(optional)* the **[GitHub CLI](https://cli.github.com) (`gh`)**, signed in
+  (`gh auth login`) — only needed to approve a PR from the summary screen.
 
 > Loupe makes **no network calls of its own** — every AI request goes through *your*
 > `claude` CLI with *your* token.
