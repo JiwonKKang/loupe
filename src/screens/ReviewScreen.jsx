@@ -174,7 +174,7 @@ export default function ReviewScreen(props) {
     cluster, clusterIndex, analysisState,
     spineItems, onSelect,
     verdict, flagged, hasPrev, hasNext,
-    onPass, onPrev, onNext, onJumpUnresolved,
+    onPass, onUnpass, onPrev, onNext, onJumpUnresolved,
     threads, onOpenLine, onResolve, onSend, onSetThreadModel, onDeleteThread, onNavigateCard, onOpenInEditor,
     // #8/#9 shared contract — set of threadId with an arrived AI reply that has
     // not yet been read (read = expanding that thread). App owns the set; when it
@@ -296,6 +296,7 @@ export default function ReviewScreen(props) {
   const [expanded, setExpanded] = React.useState(() => new Set());
   // Header path starts collapsed (first/last segments) on every card; click expands.
   const [pathFull, setPathFull] = React.useState(false);
+  const [passHover, setPassHover] = React.useState(false); // "Passed" badge → "패스 취소" on hover
   React.useEffect(() => { setExpanded(new Set()); setPathFull(false); }, [card.id]);
   const CONTEXT = 2;
   const display = React.useMemo(() => {
@@ -925,15 +926,24 @@ export default function ReviewScreen(props) {
             {/* Card header — the cluster name lives in the top bar now, not on the card. */}
             <div style={{ padding: '22px var(--gutter-card) 18px',
               borderBottom: '1px solid var(--border-subtle)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+              {/* fixed-height row so the 22px "Passed" badge appearing doesn't make the
+                  header taller (which slightly shrank the card) — reserve its height always. */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, minHeight: 22 }}>
                 <span style={{ font: 'var(--weight-semibold) var(--text-base)/1 var(--font-mono)',
                   color: 'var(--text-primary)', letterSpacing: 'var(--tracking-snug)' }}>{card.symbol}</span>
                 {verdict === 'pass' && (
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, height: 22,
-                    padding: '0 9px', borderRadius: 'var(--radius-pill)', background: 'var(--pass-dim)',
-                    border: '1px solid var(--pass-line)', color: 'var(--pass)',
-                    font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)' }}>
-                    <Ico d={check} w={13} />Passed</span>)}
+                  <button onClick={onUnpass} title="패스 취소 (⌘Z)"
+                    onMouseEnter={() => setPassHover(true)} onMouseLeave={() => setPassHover(false)}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flex: 'none', height: 22,
+                      padding: '0 9px', borderRadius: 'var(--radius-pill)', cursor: 'pointer',
+                      background: passHover ? 'var(--flag-dim)' : 'var(--pass-dim)',
+                      border: `1px solid ${passHover ? 'var(--flag-line)' : 'var(--pass-line)'}`,
+                      color: passHover ? 'var(--flag)' : 'var(--pass)',
+                      font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)',
+                      transition: 'var(--t-hover)' }}>
+                    {/* icon swaps check→× (same 13px width) but the TEXT stays "Passed" so
+                        the badge never changes width — no header reflow / card-size jitter. */}
+                    <Ico d={passHover ? 'M18 6 6 18M6 6l12 12' : check} w={13} />Passed</button>)}
                 <span onClick={() => setPathFull((v) => !v)} title={pathFull ? '경로 접기' : card.path}
                   style={{ marginLeft: 'auto', flex: 'none', maxWidth: '55%', cursor: 'pointer',
                     font: 'var(--text-sm)/1 var(--font-mono)', color: 'var(--text-tertiary)',
@@ -1124,6 +1134,7 @@ export default function ReviewScreen(props) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 18, opacity: 'var(--dim-rest)' }}>
               <KeyHint keys={['←', '→']} label="Move" size="sm" />
               <KeyHint keys="+" label="to comment" size="sm" tone="accent" />
+              <KeyHint keys="⌘Z" label="undo pass" size="sm" />
             </div>
           </div>
 

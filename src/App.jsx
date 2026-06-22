@@ -499,7 +499,30 @@ export default function App() {
     if (index >= list.length - 1) { setScreen('summary'); return; }
     goTo(index + 1, 1);
   };
-  const pass = () => { if (!card) return; setVerdicts((p) => ({ ...p, [card.id]: 'pass' })); advance(); };
+  // Pass marks the card 'pass' and advances. We remember the order of passes so a
+  // mis-pressed Space can be undone (⌘Z) — pop the last pass, clear its verdict, and
+  // jump back to that card. `unpass` clears a specific card's pass without navigating
+  // (used by the clickable "Passed" badge when you're already on the card).
+  const passHistory = React.useRef([]);
+  const pass = () => {
+    if (!card) return;
+    passHistory.current.push(card.id);
+    setVerdicts((p) => ({ ...p, [card.id]: 'pass' }));
+    advance();
+  };
+  const unpass = (id) => {
+    const target = id || (card && card.id);
+    if (!target) return;
+    setVerdicts((p) => { if (p[target] == null) return p; const n = { ...p }; delete n[target]; return n; });
+    passHistory.current = passHistory.current.filter((x) => x !== target);
+  };
+  const undoPass = () => {
+    const id = passHistory.current.pop();
+    if (!id) return;
+    setVerdicts((p) => { const n = { ...p }; delete n[id]; return n; });
+    const i = list.findIndex((c) => c.id === id);
+    if (i >= 0) goTo(i, i <= index ? -1 : 1);
+  };
   const next = () => { if (index < list.length - 1) goTo(index + 1, 1); else setScreen('summary'); };
   const prev = () => { if (index > 0) goTo(index - 1, -1); };
 
@@ -715,6 +738,9 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'e' || e.key === 'E')) { e.preventDefault(); goBack(); return; }
       const tag = (e.target.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      // ⌘/Ctrl+Z — undo the last pass (after the input guard, so it stays text-undo
+      // inside a thread composer). Mis-pressed Space → ⌘Z puts the card back.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); undoPass(); return; }
       if (e.key === ' ') { e.preventDefault(); pass(); }
       else if (e.key === 'j' || e.key === 'J' || e.key === 'ArrowRight') { e.preventDefault(); next(); }
       else if (e.key === 'k' || e.key === 'K' || e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
@@ -836,7 +862,7 @@ export default function App() {
           unreadThreads={unreadThreads}
           verdict={verdicts[card.id]} flagged={hasUnresolved(card.id)}
           hasPrev={index > 0} hasNext={index < list.length - 1}
-          onPass={pass} onPrev={prev} onNext={next}
+          onPass={pass} onUnpass={() => unpass(card.id)} onPrev={prev} onNext={next}
           threads={cardThreads}
           onOpenLine={openLine} onResolve={resolveThread} onSend={sendThread}
           onSetThreadModel={setThreadModel} onDeleteThread={deleteThread}
