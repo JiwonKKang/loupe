@@ -103,6 +103,10 @@ export function ProgressSpine({ items = [], activeId, onSelect, defaultExpanded 
         overflow: 'hidden', flex: 'none',
         opacity: expanded ? 1 : 0.7,
         display: 'flex', flexDirection: 'column',
+        // Bound the spine's own reflow/paint to itself during the width animation so it
+        // doesn't participate in document-wide reflow each frame (overflow:hidden already
+        // clips, so `paint` changes nothing visible).
+        contain: 'layout paint',
         // Non-scrolling top inset reserves the overlay title bar's traffic-light
         // zone, so the scroll viewport (and any scrolled dots) stays BELOW it.
         paddingTop: 46,

@@ -82,6 +82,7 @@ export function Thread({
         color: resolved ? 'var(--text-tertiary)' : 'var(--accent)',
         font: `var(--weight-medium) 11px/1 var(--font-ui)`,
         cursor: 'pointer',
+        willChange: 'transform, opacity', backfaceVisibility: 'hidden',
         animation: 'loupe-thread-badge-in var(--dur-base) var(--ease-out)',
         ...style,
       }}>
@@ -104,9 +105,14 @@ export function Thread({
       background: 'var(--surface-overlay)', border: '1px solid var(--border-subtle)',
       borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-sm)',
       overflow: 'hidden', transformOrigin: 'top center',
+      // Promote to its own compositor layer so the open/close transform+opacity stays on
+      // the GPU instead of repainting the card + shadow on the main thread (4K smoothness).
+      willChange: 'transform, opacity', backfaceVisibility: 'hidden',
+      // Open enter at --dur-base (220ms), not --dur-slow (380ms) — a long translateY+fade
+      // on a full-width card reads as laggy on 4K; snappier + symmetric with the 170ms exit.
       animation: closing
         ? 'loupe-thread-out 0.17s var(--ease-out) forwards'
-        : 'loupe-thread-in var(--dur-slow) var(--ease-out)',
+        : 'loupe-thread-in var(--dur-base) var(--ease-out)',
       padding: '14px 16px 13px', ...style,
     }}>
       {/* quiet top-right actions: delete · collapse · resolve */}

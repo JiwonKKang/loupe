@@ -876,7 +876,12 @@ export default function ReviewScreen(props) {
             the vertical breathing room. This stage is position:relative — the anchor
             for the edge-pinned arrows below. */}
         <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center',
-          justifyContent: 'center', padding: '24px 76px', minHeight: 0 }}>
+          justifyContent: 'center', padding: '24px 76px', minHeight: 0,
+          // Isolate the card subtree's layout so the spine's width animation (which
+          // re-centers the card) doesn't re-evaluate the diff virtualization against the
+          // whole document each frame. `layout` only (NOT paint) so the card's big
+          // ambient shadow isn't clipped.
+          contain: 'layout' }}>
 
           {/* #4: side navigation arrows — pinned to the CANVAS edges (this stage
               container, position:relative), vertically centered, card-width-agnostic. */}

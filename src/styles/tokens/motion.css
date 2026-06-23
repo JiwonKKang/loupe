@@ -20,6 +20,8 @@
   --t-hover: background-color var(--dur-fast) var(--ease-soft),
              border-color var(--dur-fast) var(--ease-soft),
              color var(--dur-fast) var(--ease-soft);
-  --t-rail:  width var(--dur-slow) var(--ease-out),
+  /* width is a layout property (not compositable) — a long animation = many reflow
+     frames, which reads as jank on 4K. Keep it snappy (240ms, not --dur-slow=380). */
+  --t-rail:  width 240ms var(--ease-out),
              opacity var(--dur-base) var(--ease-soft);
 }
