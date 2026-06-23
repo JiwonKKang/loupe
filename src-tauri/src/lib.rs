@@ -691,6 +691,85 @@ async fn approve_pr(
     .map_err(|e| format!("PR 승인 작업이 패닉했어요: {e}"))?
 }
 
+/// Post a LINE-ANCHORED review comment on the open PR for `target`, at `file:line` on
+/// the new-file (RIGHT) side. gh has no line-comment CLI, so we POST via `gh api` to the
+/// pulls/comments endpoint with the PR head commit. ONLY invoked by an explicit user
+/// click in a thread while an OPEN PR exists. Returns the created comment's html_url.
+#[tauri::command]
+async fn pr_comment(
+    repo_path: String,
+    target: String,
+    file: String,
+    line: u32,
+    body: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let target = pr_branch_name(&repo_path, &target);
+        let body = body.trim().to_string();
+        if body.is_empty() {
+            return Err("댓글 내용이 비어 있어요.".into());
+        }
+        // owner/repo for the gh api path (gh infers it from the repo's remote).
+        let nwo_out = run_gh(&repo_path, &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])?;
+        if !nwo_out.status.success() {
+            return Err(gh_error(&String::from_utf8_lossy(&nwo_out.stderr)));
+        }
+        let nwo = String::from_utf8_lossy(&nwo_out.stdout).trim().to_string();
+        if nwo.is_empty() {
+            return Err("GitHub 저장소를 확인할 수 없어요.".into());
+        }
+        // The PR number, state and head commit to anchor the comment to.
+        let view = run_gh(&repo_path, &["pr", "view", &target, "--json", "number,state,headRefOid"])?;
+        if !view.status.success() {
+            let stderr = String::from_utf8_lossy(&view.stderr);
+            if is_no_pr(&stderr) {
+                return Err(format!("이 브랜치({target})에 열린 PR이 없어요."));
+            }
+            return Err(gh_error(&stderr));
+        }
+        let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&view.stdout))
+            .map_err(|e| format!("gh 응답 파싱 실패: {e}"))?;
+        let number = v.get("number").and_then(|x| x.as_u64()).unwrap_or(0);
+        let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("");
+        let commit = v.get("headRefOid").and_then(|x| x.as_str()).unwrap_or("");
+        if state != "OPEN" {
+            return Err(format!("열린 PR이 아니에요 (#{number}, {state})."));
+        }
+        if commit.is_empty() {
+            return Err("PR의 커밋(SHA)을 확인할 수 없어요.".into());
+        }
+        let endpoint = format!("repos/{nwo}/pulls/{number}/comments");
+        let body_f = format!("body={body}");
+        let commit_f = format!("commit_id={commit}");
+        let path_f = format!("path={file}");
+        let line_f = format!("line={}", line.max(1));
+        let out = run_gh(&repo_path, &[
+            "api", "-X", "POST", &endpoint,
+            "-f", &body_f, "-f", &commit_f, "-f", &path_f, "-F", &line_f, "-f", "side=RIGHT",
+        ])?;
+        if out.status.success() {
+            let r: serde_json::Value =
+                serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap_or(serde_json::Value::Null);
+            return Ok(r.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string());
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // gh writes the 422 validation BODY to STDOUT (stderr only has "Validation Failed
+        // (HTTP 422)"), and GitHub's wording for a line/path not in the diff is
+        // "could not be resolved" — so match across both streams.
+        let combined =
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr).to_lowercase();
+        if combined.contains("not part of the diff")
+            || (combined.contains("could not be resolved")
+                && (combined.contains("line") || combined.contains("path")))
+        {
+            return Err("그 줄엔 PR 댓글을 달 수 없어요 — diff에 포함된, 변경된 줄에만 달 수 있어요.".into());
+        }
+        Err(gh_error(&stderr))
+    })
+    .await
+    .map_err(|e| format!("PR 댓글 작업이 패닉했어요: {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -718,7 +797,8 @@ pub fn run() {
             save_threads,
             open_in_editor,
             pr_status,
-            approve_pr
+            approve_pr,
+            pr_comment
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

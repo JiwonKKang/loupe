@@ -20,9 +20,13 @@ export function Thread({
   onSend,
   onDelete,
   onNavigateCard,
+  prOpen = false,
+  onPrComment,
   style = {},
 }) {
   const [draft, setDraft] = React.useState('');
+  // PR line-comment posting state: 'idle' | 'posting' | 'posted'
+  const [prState, setPrState] = React.useState('idle');
   // #autofocus — when an open thread mounts (created by drag/click, or expanded),
   // drop the caret straight into its composer so the reviewer can type at once.
   // ref + layout effect (rather than the autoFocus attr) so it also fires when a
@@ -220,6 +224,14 @@ export function Thread({
             {(() => {
               const has = draft.trim().length > 0;
               const send = (kind) => { if (has) { onSend && onSend(draft.trim(), kind); setDraft(''); } };
+              const postPr = () => {
+                if (!has || !onPrComment || prState === 'posting') return;
+                const text = draft.trim();
+                setPrState('posting');
+                Promise.resolve(onPrComment(text))
+                  .then(() => { setPrState('posted'); setDraft(''); setTimeout(() => setPrState('idle'), 2200); })
+                  .catch(() => setPrState('idle'));
+              };
               const btn = (label, kbd, kind, fg, bg, bd) => (
                 <button onClick={() => send(kind)} disabled={!has} title={label} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 4, height: 22, padding: '0 7px',
@@ -237,6 +249,22 @@ export function Thread({
                 <React.Fragment>
                   {btn('질문', '⏎', 'question', 'var(--accent)', 'var(--accent-dim)', 'var(--accent-line)')}
                   {btn('요청', '⌘⏎', 'command', 'var(--flag)', 'var(--flag-dim)', 'var(--flag-line)')}
+                  {/* PR line comment — only when the reviewed branch has an OPEN PR. Posts
+                      the composer text to that file:line on the PR via gh. */}
+                  {prOpen && onPrComment && (
+                    <button onClick={postPr} disabled={!has || prState === 'posting' || prState === 'posted'}
+                      title="이 줄에 PR 리뷰 댓글로 올리기" style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 4, height: 22, padding: '0 8px',
+                        flex: 'none', borderRadius: 'var(--radius-sm)',
+                        cursor: has && prState === 'idle' ? 'pointer' : 'default',
+                        background: prState === 'posted' ? 'var(--pass-dim)' : 'var(--surface-inset)',
+                        border: `1px solid ${prState === 'posted' ? 'var(--pass-line)' : 'var(--border-default)'}`,
+                        color: prState === 'posted' ? 'var(--pass)' : 'var(--text-secondary)',
+                        opacity: has || prState !== 'idle' ? 1 : 0.4, transition: 'var(--t-hover)',
+                        font: 'var(--weight-medium) 10px/1 var(--font-ui)', whiteSpace: 'nowrap' }}>
+                      {prState === 'posting' ? '올리는 중…' : prState === 'posted' ? 'PR에 올림 ✓' : 'PR 댓글'}
+                    </button>
+                  )}
                 </React.Fragment>
               );
             })()}

@@ -176,6 +176,7 @@ export default function ReviewScreen(props) {
     verdict, flagged, hasPrev, hasNext,
     onPass, onUnpass, onPrev, onNext, onJumpUnresolved,
     threads, onOpenLine, onResolve, onSend, onSetThreadModel, onDeleteThread, onNavigateCard, onOpenInEditor,
+    prOpen, onPrComment,
     // #8/#9 shared contract — set of threadId with an arrived AI reply that has
     // not yet been read (read = expanding that thread). App owns the set; when it
     // doesn't pass one yet, default to an empty Set so `.has(...)` stays safe.
@@ -1071,7 +1072,11 @@ export default function ReviewScreen(props) {
                           collapsed={false} onToggle={() => onOpenLine(thread.side || 'old', r)}
                           onResolve={() => onResolve(thread.id)} onSend={(t, kind) => onSend(thread.id, t, kind)}
                           onDelete={onDeleteThread ? () => onDeleteThread(thread.id) : undefined}
-                          onNavigateCard={onNavigateCard} />
+                          onNavigateCard={onNavigateCard}
+                          prOpen={prOpen}
+                          onPrComment={prOpen && onPrComment
+                            ? (text) => onPrComment(card.path, (row.right && row.right.n) || (row.left && row.left.n) || 1, text)
+                            : undefined} />
                       </div>
                     )}
                     {thread && !thread.open && (() => {

@@ -263,6 +263,17 @@ export default function App() {
     load({ repoPath: rp, base: b, target: t });
   }, [load]);
 
+  // Cancel a mis-started analysis: bump the sequence so the in-flight analyze_review
+  // result is dropped, and go back to project-picking. (The cards already finished are
+  // still cached on the Rust side, so re-opening is cheap; we don't kill the subprocess.)
+  const cancelAnalysis = React.useCallback(() => {
+    analyzeSeq.current++;
+    setAnalysisState('idle');
+    setProgress(INITIAL_PROGRESS);
+    setLoadError(null);
+    setScreen('pickProject');
+  }, []);
+
   // ---- `loupe://review?repoPath=&base=&target=` deep links (the `loupe` CLI) ----
   // The CLI opens this URL; the OS routes it here (launching or focusing the app).
   // We stash the parsed range and apply it once a token exists.
@@ -354,25 +365,23 @@ export default function App() {
   );
   const card = list[index];
 
-  // --- GitHub PR approval (summary screen, all-pass) ---------------------------
-  // Delegated to the user's `gh` CLI (Loupe makes no GitHub calls of its own). The
-  // PR is queried ONLY when the review actually ended all-pass — and approval only
-  // ever fires from an explicit click in SummaryScreen (never automatically here).
-  const allPass = list.length > 0
-    && list.every((c) => verdicts[c.id] === 'pass')
-    && threads.every((t) => t.resolved);
-  // prStatus.state: 'unknown' | 'loading' | 'open' | 'none' | 'error' (+ PrInfo fields when 'open')
+  // --- GitHub PR (Approve on summary · line comments from threads) -------------
+  // Delegated to the user's `gh` CLI (Loupe makes no GitHub calls of its own). We
+  // query the PR for the reviewed branch once on the review OR summary screen, so the
+  // summary can always offer Approve and an open-PR thread can post a line comment —
+  // both only ever fire from an explicit user click (never automatically here).
+  // prStatus.state: 'unknown' | 'loading' | 'open' | 'closed' | 'none' | 'error' (+ `pr` when open/closed)
   const [prStatus, setPrStatus] = React.useState({ state: 'unknown' });
   const [approveState, setApproveState] = React.useState('idle'); // idle | approving | approved | error
   React.useEffect(() => {
     setApproveState('idle');
-    if (screen !== 'summary' || !allPass || !repoPath || !target) { setPrStatus({ state: 'unknown' }); return; }
+    const onPrScreen = screen === 'summary' || screen === 'review';
+    if (!onPrScreen || !repoPath || !target) { setPrStatus({ state: 'unknown' }); return; }
     let alive = true;
     setPrStatus({ state: 'loading' });
     invoke('pr_status', { repoPath, target })
-      // The PR info is NESTED under `pr` so gh's own uppercase `state` field
-      // (OPEN/MERGED/CLOSED) never overwrites our wrapper `state`. Only an OPEN PR is
-      // approvable; a merged/closed one shows as 'closed' (no button).
+      // The PR info is NESTED under `pr` so gh's own uppercase `state`
+      // (OPEN/MERGED/CLOSED) never overwrites our wrapper `state`.
       .then((info) => {
         if (!alive) return;
         if (!info) { setPrStatus({ state: 'none' }); return; }
@@ -380,7 +389,7 @@ export default function App() {
       })
       .catch(() => { if (alive) setPrStatus({ state: 'error' }); });
     return () => { alive = false; };
-  }, [screen, allPass, repoPath, target]);
+  }, [screen, repoPath, target]);
   const approvePr = React.useCallback((body) => {
     setApproveState('approving');
     invoke('approve_pr', { repoPath, target, body: body || null })
@@ -392,6 +401,16 @@ export default function App() {
         editorMsgTimer.current = setTimeout(() => setEditorMsg(null), 6000);
       });
   }, [repoPath, target]);
+  // Post a line-anchored comment to the open PR (from a thread). Returns the invoke
+  // promise so the caller can show the result; errors surface via the toast too.
+  const commentPr = React.useCallback((file, line, body) => (
+    invoke('pr_comment', { repoPath, target, file, line, body }).catch((e) => {
+      setEditorMsg(String(e));
+      if (editorMsgTimer.current) clearTimeout(editorMsgTimer.current);
+      editorMsgTimer.current = setTimeout(() => setEditorMsg(null), 6000);
+      throw e;
+    })
+  ), [repoPath, target]);
 
   // cluster id -> its title/kind, for spine grouping + the card's cluster band.
   const clusterById = React.useMemo(() => {
@@ -844,7 +863,7 @@ export default function App() {
     return (
       <React.Fragment>
         {dragStrip}
-        <AnalyzeScreen progress={progress} />
+        <AnalyzeScreen progress={progress} onCancel={cancelAnalysis} />
         <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
     );
@@ -885,6 +904,7 @@ export default function App() {
           onSetThreadModel={setThreadModel} onDeleteThread={deleteThread}
           onNavigateCard={(n) => { const i = Number(n) - 1; if (i >= 0 && i < list.length) goTo(i, i > index ? 1 : -1); }}
           onOpenInEditor={openInEditor}
+          prOpen={prStatus.state === 'open'} onPrComment={commentPr}
         />
       )}
       {screen === 'summary' && (

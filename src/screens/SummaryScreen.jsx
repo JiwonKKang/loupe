@@ -129,7 +129,7 @@ export default function SummaryScreen(props) {
         {/* PR approval — only on an ALL-PASS review, and only when an OPEN PR exists for
             the reviewed branch. Delegated to the user's gh CLI; approving is an explicit
             two-step confirm that names the exact PR (outward-facing, hard to reverse). */}
-        {allPass && prStatus && prStatus.state !== 'unknown' && (
+        {prStatus && prStatus.state !== 'unknown' && (
           <div style={{ marginTop: 28, padding: '16px 18px', borderRadius: 'var(--radius-lg)',
             border: '1px solid var(--border-subtle)', background: 'var(--surface-inset)' }}>
             {prStatus.state === 'loading' && (
@@ -160,6 +160,11 @@ export default function SummaryScreen(props) {
                   <span style={{ font: 'var(--text-base)/1.3 var(--font-ui)', color: 'var(--text-primary)',
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{prStatus.pr.title}</span>
                 </div>
+                {!allPass && approveState !== 'approved' && (
+                  <div style={{ marginBottom: 10, font: 'var(--text-sm)/1.4 var(--font-ui)', color: 'var(--flag)' }}>
+                    아직 통과 안 된 카드나 미해결 스레드가 있어요 — 그래도 승인할 수 있어요.
+                  </div>
+                )}
                 {approveState === 'approved' ? (
                   <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7,
                     font: 'var(--weight-medium) var(--text-sm)/1 var(--font-ui)', color: 'var(--pass)' }}>

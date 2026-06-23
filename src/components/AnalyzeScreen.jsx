@@ -32,7 +32,7 @@ const Check = ({ c = 'currentColor' }) => (
     strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
 );
 
-export function AnalyzeScreen({ progress }) {
+export function AnalyzeScreen({ progress, onCancel }) {
   const phase = progress?.phase || 'static';
   const files = progress?.files || 0;
   const clusters = progress?.clusters || [];
@@ -60,6 +60,22 @@ export function AnalyzeScreen({ progress }) {
         background: 'var(--bg-raised)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {/* extra top padding clears the overlay title bar's traffic lights */}
         <div style={{ padding: '52px 22px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
+          {/* Cancel a mis-started analysis and return to project picking. */}
+          {onCancel && (
+            <button onClick={onCancel} title="분석을 취소하고 프로젝트 선택으로 돌아가기"
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-inset)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginBottom: 14,
+                height: 26, padding: '0 11px 0 8px', borderRadius: 'var(--radius-pill)',
+                background: 'transparent', border: '1px solid var(--border-default)',
+                color: 'var(--text-tertiary)', cursor: 'pointer',
+                transition: 'var(--t-hover)',
+                font: 'var(--weight-medium) var(--text-xs)/1 var(--font-ui)' }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7" /></svg>
+              분석 취소
+            </button>
+          )}
           <div style={{ font: 'var(--weight-semibold) var(--text-sm)/1 var(--font-ui)', color: 'var(--text-primary)' }}>Review queue</div>
           <div style={{ font: 'var(--text-xs)/1 var(--font-ui)', color: 'var(--text-tertiary)', marginTop: 6 }}>
             {doneCards} of {totalCards} changes
