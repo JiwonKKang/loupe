@@ -295,11 +295,9 @@ function ModelMenu({ model = 'sonnet', onSetModel }) {
             transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-soft)' }}><path d="M6 9l6 6 6-6" /></svg>
       </button>
       {open && rect && (
-        // Opens UPWARD (translateY -100%) — the composer sits low in the card, so
-        // a downward menu could fall off-screen. Fixed positioning dodges the
+        // Opens DOWNWARD, just below the trigger. Fixed positioning dodges the
         // thread's overflow:hidden.
-        <div ref={popRef} style={{ position: 'fixed', left: rect.left, top: rect.top,
-          transform: 'translateY(calc(-100% - 6px))',
+        <div ref={popRef} style={{ position: 'fixed', left: rect.left, top: rect.bottom + 6,
           minWidth: rect.width, zIndex: 60, background: 'var(--surface-overlay)',
           border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
           boxShadow: 'var(--shadow-pop)', padding: 4 }}>

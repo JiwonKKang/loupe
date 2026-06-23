@@ -751,12 +751,22 @@ export default function App() {
 
   const cardThreads = card ? threads.filter((t) => t.cardId === card.id) : [];
 
+  // The overlay (frameless) title bar has no chrome — this thin strip across the very
+  // top is a window drag handle present on EVERY screen (analyze, summary, settings,
+  // …), so you can always move the window. zIndex 35 keeps it above screen content
+  // (e.g. the analyze panels) but below the project menu (z40) so that stays clickable.
+  const dragStrip = (
+    <div data-tauri-drag-region
+      style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 34, zIndex: 35 }} />
+  );
+
   // --- Render. All hooks are declared above; guards live here. ---
 
   // Settings stands on its own (reachable from any screen via the gear).
   if (screen === 'settings') {
     return (
       <React.Fragment>
+        {dragStrip}
         <Settings connected={token.length > 0}
           onBack={() => setScreen(prevScreen)}
           onSaved={(t) => setToken(t)}
@@ -770,6 +780,7 @@ export default function App() {
   if (screen === 'onboarding') {
     return (
       <React.Fragment>
+        {dragStrip}
         <Onboarding onFinish={finishOnboarding} />
         {onboardError && <OnboardErrorToast message={onboardError} />}
         <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
@@ -783,6 +794,7 @@ export default function App() {
   if (screen === 'pickProject') {
     return (
       <React.Fragment>
+        {dragStrip}
         <div data-tauri-drag-region style={{ position: 'absolute', inset: 0, background: 'var(--bg-base)', overflow: 'hidden' }}>
           <ProjectMenu
             project={repoPath} base={base} target={target}
@@ -810,6 +822,7 @@ export default function App() {
   if (!repoPath) {
     return (
       <React.Fragment>
+        {dragStrip}
         <EmptyDiffScreen range={null} onBack={() => setScreen('pickProject')} />
         <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
@@ -820,6 +833,7 @@ export default function App() {
   if (loadError) {
     return (
       <React.Fragment>
+        {dragStrip}
         <LoadErrorScreen message={loadError} onRetry={() => load({ repoPath, base, target })}
           onBack={() => setScreen('pickProject')} />
         <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
@@ -829,6 +843,7 @@ export default function App() {
   if (cards === null) {
     return (
       <React.Fragment>
+        {dragStrip}
         <AnalyzeScreen progress={progress} />
         <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
@@ -837,6 +852,7 @@ export default function App() {
   if (cards.length === 0) {
     return (
       <React.Fragment>
+        {dragStrip}
         <EmptyDiffScreen range={{ base, target }} onBack={() => setScreen('pickProject')} />
         <ScreenSwitcher screen={screen} setScreen={setScreen} onSettings={openSettings} />
       </React.Fragment>
@@ -845,6 +861,7 @@ export default function App() {
 
   return (
     <React.Fragment>
+      {dragStrip}
       {screen === 'review' && card && (
         <FileTree tree={tree} activeId={card.id} open={treeOpen}
           onToggle={() => setTreeOpen((v) => !v)}

@@ -267,8 +267,6 @@ export default function ReviewScreen(props) {
     threads.forEach((t) => { m[t.lineN] = t; });
     return m;
   }, [threads]);
-  // While a thread is open, hide the "+" entirely (it shouldn't linger under the cursor).
-  const anyOpenThread = threads.some((t) => t.open);
   // A collapsed thread's badge under the cursor → preview its region too.
   const [hoverThreadId, setHoverThreadId] = React.useState(null);
 
@@ -700,7 +698,10 @@ export default function ReviewScreen(props) {
     const isChange = kind === 'change';
     const tone = side === 'old' ? 'del' : 'add';
     const filled = !!cell;
-    const showPlus = filled && !thread && !anyOpenThread && ((!dragging && hover && hover.side === side && hover.r === r)
+    // The "+" shows on any thread-less line whose gutter you hover (or the drag's
+    // current row) — even while another thread is open, so you can start a second
+    // thread. (`!thread` already keeps it off the line that has the open thread.)
+    const showPlus = filled && !thread && ((!dragging && hover && hover.side === side && hover.r === r)
       || (dragging && dragSide === side && dragTo === r));
     const bg = flash ? 'rgba(110, 139, 255, 0.22)'
       : active ? 'rgba(110, 139, 255, 0.20)'
@@ -751,7 +752,10 @@ export default function ReviewScreen(props) {
         if (e.metaKey || e.ctrlKey) {
           e.preventDefault(); e.stopPropagation();
           pressRow(r, side);
-          if (onOpenInEditor && navLine) onOpenInEditor(card.path, navLine);
+          // Open at the line the user actually clicked (this cell's own new-file
+          // gutter number) — NOT the row's navLine (right.n||left.n), which on a
+          // change row gave the AFTER line even when you clicked the BEFORE side.
+          if (onOpenInEditor && cell && cell.n != null) onOpenInEditor(card.path, cell.n);
           return;
         }
         // Plain mousedown starts a native text selection — lock it to THIS side so
@@ -1027,15 +1031,19 @@ export default function ReviewScreen(props) {
                 // layout, it only gives offsetHeight something to read.
                 return (
                   <div key={r} ref={measure(gi)}>
+                    {/* Half is invoked as a FUNCTION (not <Half/>) so it inlines into this
+                        tree. As a component its identity changes every render (defined in
+                        the body), which made React remount every visible row on each scroll
+                        frame — the source of the scroll stutter. Inlined, rows reconcile. */}
                     <div data-line={r} style={{ display: 'flex', minWidth: 0 }}>
-                      <Half cell={row.left} kind={row.kind} side="old" r={r}
-                        active={active && dragSide === 'old'} isFirst={isFirst && dragSide === 'old'} isLast={isLast && dragSide === 'old'} thread={thread}
-                        region={regionOld} regFirst={regFirstOld} regLast={regLastOld} navLine={navLine}
-                        flash={!!(flashRow && flashRow.r === r && flashRow.side === 'old')} />
-                      <Half cell={row.right} kind={row.kind} side="new" r={r}
-                        active={active && dragSide === 'new'} isFirst={isFirst && dragSide === 'new'} isLast={isLast && dragSide === 'new'} thread={thread}
-                        region={regionNew} regFirst={regFirstNew} regLast={regLastNew} navLine={navLine}
-                        flash={!!(flashRow && flashRow.r === r && flashRow.side === 'new')} />
+                      {Half({ cell: row.left, kind: row.kind, side: 'old', r,
+                        active: active && dragSide === 'old', isFirst: isFirst && dragSide === 'old', isLast: isLast && dragSide === 'old', thread,
+                        region: regionOld, regFirst: regFirstOld, regLast: regLastOld, navLine,
+                        flash: !!(flashRow && flashRow.r === r && flashRow.side === 'old') })}
+                      {Half({ cell: row.right, kind: row.kind, side: 'new', r,
+                        active: active && dragSide === 'new', isFirst: isFirst && dragSide === 'new', isLast: isLast && dragSide === 'new', thread,
+                        region: regionNew, regFirst: regFirstNew, regLast: regLastNew, navLine,
+                        flash: !!(flashRow && flashRow.r === r && flashRow.side === 'new') })}
                     </div>
                     {thread && thread.open && (
                       <div ref={(el) => { if (el) threadEls.current[thread.id] = el; }}
