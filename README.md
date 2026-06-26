@@ -94,9 +94,12 @@ Installed alongside the app by the Homebrew cask.
 ```sh
 loupe                                   # current dir, auto base/target
 loupe ~/code/myproject main feature/x   # explicit
+loupe https://github.com/owner/repo/pull/123   # review a PR (clones to a tmp dir)
 ```
 
-It resolves the range and opens the app straight into the review.
+It resolves the range and opens the app straight into the review. Passing a **GitHub
+PR URL** clones the repo into a reusable tmp dir, checks out the PR head, and reviews
+`base...head` — re-running the same PR reuses the clone (requires `gh`, authenticated).
 
 ## How it works
 

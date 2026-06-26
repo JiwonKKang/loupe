@@ -1,31 +1,88 @@
 #!/bin/sh
 # loupe — open a code review in the Loupe app from the terminal / a skill.
 #
-#   loupe [path] [base] [target]
+#   loupe [path] [base] [target]      review a LOCAL repo
 #     path    git repo (or any dir inside one); default: current directory
 #     base    base branch;   default: first of develop/main/master, else target
 #     target  compare branch; default: current branch (HEAD)
+#
+#   loupe <github-pr-url>              review a REMOTE PR
+#     e.g. loupe https://github.com/owner/repo/pull/123
+#     Clones the repo into a reusable tmp dir, checks out the PR head, and reviews
+#     base...head. Requires the GitHub CLI (`gh`, authenticated). Re-running the same
+#     PR reuses + updates the clone (so a re-review is fast and keeps its threads).
 #
 # It resolves the range, then opens loupe://review?… which launches (or focuses)
 # the app and starts the analysis. The project also lands in the app's recents.
 set -eu
 
-dir="${1:-.}"
-repo=$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || {
-  echo "loupe: not a git repository: $dir" >&2
-  exit 1
-}
+# --- GitHub PR URL → clone + checkout into a reusable tmp dir ----------------------
+case "${1:-}" in
+  http://github.com/*/pull/* | https://github.com/*/pull/* )
+    pr_url="$1"
+    slug=$(printf %s "$pr_url" | sed -E 's#^https?://github\.com/([^/]+/[^/]+)/pull/.*#\1#')
+    num=$(printf %s "$pr_url" | sed -E 's#^.*/pull/([0-9]+).*#\1#')
+    if [ -z "$slug" ] || [ -z "$num" ] || [ "$slug" = "$pr_url" ]; then
+      echo "loupe: GitHub PR URL을 해석할 수 없어요: $pr_url" >&2
+      echo "       형식: loupe https://github.com/<owner>/<repo>/pull/<번호>" >&2
+      exit 1
+    fi
+    command -v gh >/dev/null 2>&1 || {
+      echo "loupe: PR을 가져오려면 GitHub CLI(gh)가 필요해요 — \`brew install gh\` 후 \`gh auth login\`." >&2
+      exit 1
+    }
 
-base="${2:-}"
-if [ -z "$base" ]; then
-  for b in develop main master; do
-    if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then base="$b"; break; fi
-  done
-fi
+    safe=$(printf %s "$slug" | tr '/' '-')
+    dir="${TMPDIR:-/tmp}/loupe-pr/${safe}-${num}"
+    if [ -d "$dir/.git" ]; then
+      echo "loupe: 기존 클론 갱신 중 — $dir"
+      git -C "$dir" fetch --quiet --all --prune 2>/dev/null || true
+    else
+      echo "loupe: $slug 클론 중 → $dir"
+      rm -rf "$dir"
+      mkdir -p "$(dirname "$dir")"
+      gh repo clone "$slug" "$dir" -- --quiet || {
+        echo "loupe: 저장소를 클론하지 못했어요 ($slug)." >&2
+        exit 1
+      }
+    fi
 
-target="${3:-}"
-[ -z "$target" ] && target=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
-[ -z "$base" ] && base="$target"
+    base=$(gh pr view "$num" --repo "$slug" --json baseRefName --jq .baseRefName 2>/dev/null || echo "")
+    if [ -z "$base" ]; then
+      echo "loupe: PR #$num 의 base 브랜치를 확인하지 못했어요 (PR이 존재하나요?)." >&2
+      exit 1
+    fi
+    # Check out the PR head (gh handles fork heads) so `target` is a local branch that
+    # `gh pr view <target>` still resolves to this PR inside the app.
+    ( cd "$dir" && gh pr checkout "$num" >/dev/null 2>&1 ) || {
+      echo "loupe: PR #$num head를 체크아웃하지 못했어요." >&2
+      exit 1
+    }
+    repo="$dir"
+    target=$(git -C "$dir" rev-parse --abbrev-ref HEAD)
+    base="origin/$base"   # resolvable after a full clone; the 3-dot diff base
+    ;;
+
+  * )
+    # --- Local repo --------------------------------------------------------------
+    dir="${1:-.}"
+    repo=$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || {
+      echo "loupe: not a git repository: $dir" >&2
+      exit 1
+    }
+
+    base="${2:-}"
+    if [ -z "$base" ]; then
+      for b in develop main master; do
+        if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then base="$b"; break; fi
+      done
+    fi
+
+    target="${3:-}"
+    [ -z "$target" ] && target=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+    [ -z "$base" ] && base="$target"
+    ;;
+esac
 
 if [ -z "$base" ] || [ -z "$target" ]; then
   echo "loupe: could not resolve base/target — pass them: loupe <path> <base> <target>" >&2
