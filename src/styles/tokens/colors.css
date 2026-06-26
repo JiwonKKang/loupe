@@ -48,6 +48,10 @@
   --diff-del-bg:      rgba(224, 112, 112, 0.09);
   --diff-del-edge:    rgba(224, 112, 112, 0.50);
   --diff-del-text:    #D89090;
+  /* word-level diff: the exact tokens that changed within a modified line —
+     stronger than the line background so the eye lands on the real edit. */
+  --diff-add-word:    rgba(87, 201, 138, 0.30);
+  --diff-del-word:    rgba(224, 112, 112, 0.30);
 
   /* ---- Syntax (calm, low-saturation; nothing shouts) ---- */
   --syn-keyword:      #B58CE6;   /* func, return, if, package          */

@@ -30,10 +30,11 @@ pub enum Lang {
     Go,
     Java,
     Rust,
+    Kotlin,
 }
 
 impl Lang {
-    /// Dispatch by file extension. `None` => unsupported (.kt and everything else)
+    /// Dispatch by file extension. `None` => unsupported (everything not listed)
     /// => file-level fallback card (no parsing).
     pub fn from_path(path: &str) -> Option<Lang> {
         let ext = path.rsplit('.').next().unwrap_or("");
@@ -41,6 +42,7 @@ impl Lang {
             "go" => Some(Lang::Go),
             "java" => Some(Lang::Java),
             "rs" => Some(Lang::Rust),
+            "kt" => Some(Lang::Kotlin),
             _ => None,
         }
     }
@@ -50,6 +52,7 @@ impl Lang {
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::Java => tree_sitter_java::LANGUAGE.into(),
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
         }
     }
 
@@ -58,6 +61,9 @@ impl Lang {
             Lang::Go => tree_sitter_go::TAGS_QUERY,
             Lang::Java => tree_sitter_java::TAGS_QUERY,
             Lang::Rust => tree_sitter_rust::TAGS_QUERY,
+            // tree-sitter-kotlin-ng ships NO tags.scm, so this is hand-written against
+            // the grammar's real node names (verified via a parse dump). See KOTLIN_TAGS_QUERY.
+            Lang::Kotlin => KOTLIN_TAGS_QUERY,
         }
     }
 
@@ -81,6 +87,10 @@ impl Lang {
                 "definition.macro",
                 "definition.module",
             ],
+            // Kotlin: class/interface/data/sealed/object all parse as a type
+            // (`definition.class`); top-level funs, methods, and extension funs are
+            // all `definition.function`. Properties/vals are intentionally excluded.
+            Lang::Kotlin => &["definition.class", "definition.function"],
         }
     }
 
@@ -125,9 +135,51 @@ impl Lang {
                 type_ref: &["reference.class"],
                 impl_: &["reference.implementation"],
             },
+            // Kotlin mirrors Java's set (hand-written query): `reference.call` for
+            // direct + navigation calls, `reference.class` for every `user_type` usage
+            // (param / return / receiver / constructor-DI / supertype), and
+            // `reference.implementation` for `: Supertype` delegation specifiers.
+            Lang::Kotlin => RefCaptureMap {
+                call: &["reference.call"],
+                type_ref: &["reference.class"],
+                impl_: &["reference.implementation"],
+            },
         }
     }
 }
+
+/// Hand-written tags query for Kotlin — tree-sitter-kotlin-ng ships no `queries/tags.scm`,
+/// so this is authored directly against the grammar's real node names (verified by dumping
+/// the parse tree of a Spring-flavored sample). It must emit the same capture vocabulary the
+/// extraction loop consumes: every match carries a `@name`, plus either a `@definition.*`
+/// (symbol boundary) or a `@reference.*` (relation). Granularity (planning decision): a card
+/// per `class`/`interface`/`object` (`@definition.class`) and per `fun` — top-level, method,
+/// or extension (`@definition.function`); `val`/property declarations are intentionally NOT
+/// symbols. Relations mirror Java's asymmetric set (`call` + `class`-as-type + `implementation`).
+const KOTLIN_TAGS_QUERY: &str = r#"
+; --- definitions (symbol boundaries) ---
+(class_declaration name: (identifier) @name) @definition.class
+(object_declaration name: (identifier) @name) @definition.class
+(function_declaration name: (identifier) @name) @definition.function
+
+; --- references: calls (direct callee + method via navigation) ---
+(call_expression . (identifier) @name) @reference.call
+(call_expression (navigation_expression (identifier) @name .)) @reference.call
+
+; --- references: type usages (params, returns, receivers, constructor DI, supertypes) ---
+(user_type (identifier) @name) @reference.class
+
+; --- references: implements / extends ---
+; Kotlin spells the three supertype forms differently under delegation_specifier:
+;   `: Iface`        -> (delegation_specifier (user_type ...))            [bare interface]
+;   `: Base()`       -> (delegation_specifier (constructor_invocation (user_type ...)))  [class extends]
+;   `: Iface by d`   -> (delegation_specifier (explicit_delegation (user_type ...)))      [by-delegation]
+; Capture all three so class-extends (incl. every sealed-subclass `: Parent()`) reaches the
+; impls bucket — verified against the grammar; the bare-only pattern missed class-extends.
+(delegation_specifier (user_type (identifier) @name)) @reference.implementation
+(delegation_specifier (constructor_invocation (user_type (identifier) @name))) @reference.implementation
+(delegation_specifier (explicit_delegation (user_type (identifier) @name))) @reference.implementation
+"#;
 
 /// Per-language mapping of which `@reference.*` capture names feed each `SymbolRefs`
 /// bucket (B1). An empty slice means "this grammar cannot express this reference kind"
@@ -471,6 +523,14 @@ fn owner_of(
             }
             // Java: method/field inside a class/interface → its `name:` field.
             (Lang::Java, "class_declaration" | "interface_declaration") => {
+                if let Some(n) = parent.child_by_field_name("name") {
+                    return n.utf8_text(src_bytes).ok().map(str::to_string);
+                }
+            }
+            // Kotlin: a fun/property inside a class/object body → the enclosing
+            // `class_declaration`/`object_declaration`'s `name:` field (a method walks
+            // up function_declaration → class_body → class_declaration).
+            (Lang::Kotlin, "class_declaration" | "object_declaration") => {
                 if let Some(n) = parent.child_by_field_name("name") {
                     return n.utf8_text(src_bytes).ok().map(str::to_string);
                 }

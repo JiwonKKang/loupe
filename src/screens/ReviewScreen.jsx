@@ -9,7 +9,7 @@ import { Thread } from '../components/Thread';
 import { Button } from '../components/Button';
 import { KeyHint } from '../components/KeyHint';
 import ProjectMenu from '../components/ProjectMenu';
-import { highlightGo } from '../data/fixtures';
+import { tokensForLine, ensureHighlighter, onReady, langFromPath, wordDiffRanges } from '../data/highlight';
 import intellijLogo from '../assets/editor-intellij.svg';
 import vscodeLogo from '../assets/editor-vscode.svg';
 
@@ -25,13 +25,46 @@ function middlePath(p, head = 2, tail = 2) {
   return [...parts.slice(0, head), '…', ...parts.slice(-tail)].join('/');
 }
 
-const _hlCache = new Map();
-function hl(s) {
-  if (_hlCache.has(s)) return _hlCache.get(s);
-  const v = highlightGo(s);
-  _hlCache.set(s, v);
-  if (_hlCache.size > 5000) _hlCache.clear();
-  return v;
+// Render one line of code: Shiki syntax tokens (color/italic) merged with the
+// word-level diff ranges for this side, so the changed tokens within a modified
+// line are emphasized. `ranges` are this side's changed char ranges (del for old,
+// add for new) or null; `side` picks the emphasis color. Falls back to plain text
+// when the highlighter isn't ready yet and there's nothing to emphasize.
+function renderCode(line, lang, ranges, side) {
+  if (line === '') return '';
+  const toks = tokensForLine(line, lang); // [{start,end,color,italic}] | null
+  const hasRanges = !!(ranges && ranges.length);
+  if (!toks && !hasRanges) return line; // plain (pre-load / unsupported lang)
+
+  const wordBg = side === 'old' ? 'var(--diff-del-word)' : 'var(--diff-add-word)';
+  const bounds = new Set([0, line.length]);
+  if (toks) for (const t of toks) { bounds.add(t.start); bounds.add(t.end); }
+  if (hasRanges) for (const r of ranges) { bounds.add(r.start); bounds.add(r.end); }
+  const pts = [...bounds].filter((b) => b >= 0 && b <= line.length).sort((a, b) => a - b);
+
+  const tokenAt = (pos) => {
+    if (!toks) return null;
+    for (const t of toks) if (pos >= t.start && pos < t.end) return t;
+    return null;
+  };
+  const changedAt = (pos) => {
+    if (!hasRanges) return false;
+    for (const r of ranges) if (pos >= r.start && pos < r.end) return true;
+    return false;
+  };
+
+  const spans = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    if (b <= a) continue;
+    const t = tokenAt(a);
+    const changed = changedAt(a);
+    const style = {};
+    if (t) { style.color = t.color; if (t.italic) style.fontStyle = 'italic'; }
+    if (changed) { style.background = wordBg; style.borderRadius = '2px'; }
+    spans.push(<span key={a} style={style}>{line.slice(a, b)}</span>);
+  }
+  return spans;
 }
 
 // Small settings popover — adjust code text size. Opens upward from a subtle
@@ -206,7 +239,13 @@ export default function ReviewScreen(props) {
     let pendDel = [], pendAdd = [];
     const flush = () => {
       const n = Math.max(pendDel.length, pendAdd.length);
-      for (let i = 0; i < n; i++) out.push({ kind: 'change', left: pendDel[i] || null, right: pendAdd[i] || null });
+      for (let i = 0; i < n; i++) {
+        const left = pendDel[i] || null, right = pendAdd[i] || null;
+        // Word-level diff only when a line was MODIFIED (paired old+new); a pure
+        // add or delete (one side null) has no intra-line diff. `wd` = {del,add}|null.
+        const wd = left && right ? wordDiffRanges(left.c, right.c) : null;
+        out.push({ kind: 'change', left, right, wd });
+      }
       pendDel = []; pendAdd = [];
     };
     card.lines.forEach((ln) => {
@@ -217,6 +256,13 @@ export default function ReviewScreen(props) {
     flush();
     return out;
   }, [card.id]);
+
+  // Syntax highlighting (Shiki) loads asynchronously; kick it off once and force a
+  // re-render when it's ready so already-mounted rows pick up real colors. `lang` is
+  // derived from the file path (null → plain text for unsupported / unknown types).
+  const lang = React.useMemo(() => langFromPath(card.path), [card.path]);
+  const [, _hlTick] = React.useReducer((x) => x + 1, 0);
+  React.useEffect(() => { ensureHighlighter(); return onReady(_hlTick); }, []);
 
   // drag-to-create-thread state. The selection is by ROW (before+after
   // highlight together, like GitHub), but we remember which SIDE the drag
@@ -695,7 +741,7 @@ export default function ReviewScreen(props) {
 
   // one side (old/new) of a split row. Selection highlight is row-wide; the
   // + affordance and a collapsed thread's badge are per-side (this column).
-  const Half = ({ cell, kind, side, r, active, isFirst, isLast, thread, region, regFirst, regLast, navLine, flash }) => {
+  const Half = ({ cell, kind, side, r, active, isFirst, isLast, thread, region, regFirst, regLast, navLine, flash, wd }) => {
     const isChange = kind === 'change';
     const tone = side === 'old' ? 'del' : 'add';
     const filled = !!cell;
@@ -798,10 +844,10 @@ export default function ReviewScreen(props) {
         <div data-side={side} style={{ overflow: 'hidden', minWidth: 0,
           font: codeFs + 'px/var(--leading-code) var(--font-mono)' }}>
           <span style={{ display: 'inline-block', boxSizing: 'border-box', minWidth: codeContentW, whiteSpace: 'pre',
-            paddingLeft: 8, paddingRight: 16, tabSize: 2,
+            paddingLeft: 8, paddingRight: 16, tabSize: 2, color: 'var(--syn-plain)',
             userSelect: selectSide && selectSide !== side ? 'none' : 'text',
             transform: 'translateX(calc(var(--hs-' + side + ') * -1))' }}>
-            {cell ? hl(cell.c) : ''}
+            {cell ? renderCode(cell.c, lang, wd, side) : ''}
           </span>
         </div>
       </div>
@@ -1045,11 +1091,11 @@ export default function ReviewScreen(props) {
                       {Half({ cell: row.left, kind: row.kind, side: 'old', r,
                         active: active && dragSide === 'old', isFirst: isFirst && dragSide === 'old', isLast: isLast && dragSide === 'old', thread,
                         region: regionOld, regFirst: regFirstOld, regLast: regLastOld, navLine,
-                        flash: !!(flashRow && flashRow.r === r && flashRow.side === 'old') })}
+                        flash: !!(flashRow && flashRow.r === r && flashRow.side === 'old'), wd: row.wd ? row.wd.del : null })}
                       {Half({ cell: row.right, kind: row.kind, side: 'new', r,
                         active: active && dragSide === 'new', isFirst: isFirst && dragSide === 'new', isLast: isLast && dragSide === 'new', thread,
                         region: regionNew, regFirst: regFirstNew, regLast: regLastNew, navLine,
-                        flash: !!(flashRow && flashRow.r === r && flashRow.side === 'new') })}
+                        flash: !!(flashRow && flashRow.r === r && flashRow.side === 'new'), wd: row.wd ? row.wd.add : null })}
                     </div>
                     {thread && thread.open && (
                       <div ref={(el) => { if (el) threadEls.current[thread.id] = el; }}

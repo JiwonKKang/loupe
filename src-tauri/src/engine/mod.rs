@@ -1227,6 +1227,14 @@ fn is_test_symbol(lang: symbols::Lang, path: &str, sym: &symbols::Symbol) -> boo
                 || name.starts_with("test")
         }
         symbols::Lang::Rust => path_is_test,
+        // Kotlin/Spring tests live under src/test/kotlin (path) and follow the JVM
+        // `XxxTest`/`XxxTests` class convention; mirror Java.
+        symbols::Lang::Kotlin => {
+            path_is_test
+                || name.ends_with("Test")
+                || name.ends_with("Tests")
+                || name.starts_with("test")
+        }
     }
 }
 
@@ -1252,6 +1260,16 @@ fn collect_imports(lang: symbols::Lang, source: &str) -> Vec<String> {
                 .trim_end_matches(';')
                 .rsplit('.')
                 .next(),
+            // Kotlin imports look like Java's (semicolon optional). An aliased import
+            // `import a.b.C as D` binds the LOCAL name `D`, so prefer the alias; else the
+            // last dotted segment.
+            symbols::Lang::Kotlin if line.starts_with("import ") => {
+                let body = line.trim_start_matches("import ").trim_end_matches(';').trim();
+                Some(match body.rsplit_once(" as ") {
+                    Some((_, alias)) => alias.trim(),
+                    None => body.rsplit('.').next().unwrap_or("").trim(),
+                })
+            }
             _ => None,
         };
         if let Some(s) = seg {

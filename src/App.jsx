@@ -22,8 +22,8 @@ import ProjectMenu from './components/ProjectMenu';
 import { AnalyzeScreen } from './components/AnalyzeScreen';
 import { FileTree } from './components/FileTree';
 import { buildTree } from './data/fixtures';
-// Note: syntax color is a front-end concern — ReviewScreen imports highlightGo
-// from ./data/fixtures directly. App.jsx only wires data + screen state.
+// Note: syntax color is a front-end concern — ReviewScreen highlights via
+// ./data/highlight (Shiki). App.jsx only wires data + screen state.
 
 // The Unclustered bucket id (engine §3.1) and its display label/kind.
 const UNCLUSTERED = '__unclustered';

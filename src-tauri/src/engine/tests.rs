@@ -95,7 +95,7 @@ fn lang_from_path_dispatch() {
     assert_eq!(Lang::from_path("a/b.go"), Some(Lang::Go));
     assert_eq!(Lang::from_path("a/b.java"), Some(Lang::Java));
     assert_eq!(Lang::from_path("a/b.rs"), Some(Lang::Rust));
-    assert_eq!(Lang::from_path("a/b.kt"), None); // Kotlin => file-level fallback
+    assert_eq!(Lang::from_path("a/b.kt"), Some(Lang::Kotlin)); // Kotlin => symbol-level
     assert_eq!(Lang::from_path("a/b.txt"), None);
     assert_eq!(Lang::from_path("Makefile"), None);
 }

@@ -1,38 +1,5 @@
-/* Loupe UI kit — fake review data + a tiny Go syntax highlighter.
-   Exports { cards, highlightGo, tree }. */
-
-import React from 'react';
-
-const KW = new Set(['func','return','if','else','for','range','package','import','var',
-  'const','type','struct','interface','map','chan','go','defer','switch','case','select','break','continue']);
-const TY = new Set(['string','int','int64','uint','bool','error','byte','rune','float64',
-  'context','Context','Time','Duration','Request','Response','ResponseWriter','Server',
-  'Session','Logger','Server','Reader','Writer','http','json','time','metrics','sync']);
-const CONST = new Set(['nil','true','false','iota']);
-
-// Returns an array of styled React spans for one line of Go.
-export function highlightGo(code) {
-  const out = [];
-  const re = /(\/\/[^\n]*)|(`[^`]*`|"(?:\\.|[^"\\])*")|(\b\d[\d_.xeE]*\b)|([A-Za-z_]\w*)|(\s+)|([^\sA-Za-z_0-9]+)/g;
-  let m, key = 0;
-  while ((m = re.exec(code)) !== null) {
-    let color = 'var(--syn-plain)', italic = false, text = m[0];
-    if (m[1] !== undefined) { color = 'var(--syn-comment)'; italic = true; }
-    else if (m[2] !== undefined) color = 'var(--syn-string)';
-    else if (m[3] !== undefined) color = 'var(--syn-number)';
-    else if (m[4] !== undefined) {
-      const w = m[4];
-      const after = code.slice(re.lastIndex).match(/^\s*\(/);
-      if (KW.has(w)) color = 'var(--syn-keyword)';
-      else if (CONST.has(w)) color = 'var(--syn-const)';
-      else if (TY.has(w)) color = 'var(--syn-type)';
-      else if (after) color = 'var(--syn-func)';
-      else color = 'var(--syn-plain)';
-    } else if (m[6] !== undefined) color = 'var(--syn-punct)';
-    out.push(React.createElement('span', { key: key++, style: { color, fontStyle: italic ? 'italic' : 'normal' } }, text));
-  }
-  return out;
-}
+/* Loupe UI kit — fake review data (cards + tree) for dev/demo.
+   Exports { cards, tree }. Real syntax highlighting lives in ./highlight (Shiki). */
 
 // helper to build diff lines: ['ctx', code] | ['add', code] | ['del', code]
 const L = (rows) => {
