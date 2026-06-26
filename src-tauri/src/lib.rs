@@ -770,6 +770,39 @@ async fn pr_comment(
     .map_err(|e| format!("PR 댓글 작업이 패닉했어요: {e}"))?
 }
 
+#[derive(serde::Serialize)]
+struct GhStatus {
+    installed: bool,
+    authed: bool,
+}
+
+/// Whether the GitHub CLI is installed AND authenticated. Onboarding shows this to
+/// nudge `gh` setup (PR approve / comment / PR-URL review all delegate to gh).
+#[tauri::command]
+async fn gh_status() -> GhStatus {
+    tokio::task::spawn_blocking(|| {
+        let path = engine::ai::cli::augmented_path();
+        let installed = std::process::Command::new("gh")
+            .arg("--version")
+            .env("PATH", &path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !installed {
+            return GhStatus { installed: false, authed: false };
+        }
+        let authed = std::process::Command::new("gh")
+            .args(["auth", "status"])
+            .env("PATH", &path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        GhStatus { installed, authed }
+    })
+    .await
+    .unwrap_or(GhStatus { installed: false, authed: false })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -798,7 +831,8 @@ pub fn run() {
             open_in_editor,
             pr_status,
             approve_pr,
-            pr_comment
+            pr_comment,
+            gh_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

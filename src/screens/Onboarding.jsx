@@ -10,6 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Button } from '../components/Button';
 import { KeyHint } from '../components/KeyHint';
 import Logo from '../components/Logo';
+import GhSetup from '../components/GhSetup';
 
 export default function Onboarding(props) {
   const [token, setToken] = React.useState('');
@@ -86,7 +87,10 @@ export default function Onboarding(props) {
           </code>
           <Button size="sm" variant="secondary"
             icon={copied ? <span style={{ color: 'var(--pass)' }}><Ico d={check} w={14} /></span> : <Ico d={copy} w={14} />}
-            onClick={() => { setCopied(true); setTimeout(() => setCopied(false), 1400); }}>
+            onClick={() => {
+              try { navigator.clipboard && navigator.clipboard.writeText('claude setup-token'); } catch { /* ignore */ }
+              setCopied(true); setTimeout(() => setCopied(false), 1400);
+            }}>
             {copied ? 'Copied' : 'Copy'}
           </Button>
         </div>
@@ -132,6 +136,12 @@ export default function Onboarding(props) {
                 style={{ ...fieldStyle, fontFamily: 'var(--font-mono)' }} />
             </div>
           )}
+        </div>
+
+        {/* GitHub CLI — used by PR approve / comment / `loupe <pr-url>`. Optional (the
+            core review needs only the Claude token), so it never blocks Continue. */}
+        <div style={{ marginTop: 18, borderTop: '1px solid var(--border-subtle)', paddingTop: 16 }}>
+          <GhSetup />
         </div>
 
         {/* footer */}

@@ -8,6 +8,7 @@ import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Button } from '../components/Button';
 import Logo from '../components/Logo';
+import GhSetup from '../components/GhSetup';
 
 export default function Settings({ connected = false, onBack, onSaved, onCleared }) {
   const [token, setToken] = React.useState('');
@@ -156,6 +157,11 @@ export default function Settings({ connected = false, onBack, onSaved, onCleared
           <div style={{ marginTop: 9, font: 'var(--text-xs)/1.5 var(--font-ui)', color: 'var(--text-faint)' }}>
             에디터 CLI 런처가 필요해요 — VS Code: “Shell Command: Install ‘code’”, IntelliJ: “Tools › Create Command-line Launcher”.
           </div>
+        </div>
+
+        {/* GitHub CLI status — PR approve / comment / `loupe <pr-url>` delegate to gh. */}
+        <div style={{ marginTop: 26, paddingTop: 22, borderTop: '1px solid var(--border-subtle)' }}>
+          <GhSetup />
         </div>
       </div>
     </div>
