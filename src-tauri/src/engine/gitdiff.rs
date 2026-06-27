@@ -115,7 +115,11 @@ pub fn diff_three_dot_with_shas(
     let target_tree = target_commit.tree()?;
 
     let mut opts = DiffOptions::new();
-    opts.context_lines(3);
+    // Full-file context: emit EVERY unchanged line as context so a card holds the whole file, not
+    // just the hunks. The front-end folds the regions with no changes (collapsed by default) and
+    // lets the reviewer expand any of them to read the surrounding code. (100k lines covers any
+    // realistic source file; libgit2 just caps context at the available lines.)
+    opts.context_lines(100_000);
     opts.include_typechange(true);
 
     let mut diff: Diff =

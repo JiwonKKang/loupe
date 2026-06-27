@@ -19,10 +19,15 @@ pub struct Symbol {
     pub name: String,
     /// Display name; same as `name` in stage 1 (qualification deferred — see note).
     pub qualified: String,
-    /// 0-base inclusive start row (node.start_position().row).
+    /// 0-base inclusive start row (node.start_position().row). For an annotated/decorated symbol
+    /// this is the FIRST modifier/annotation line (the definition node spans them), NOT the
+    /// `class`/`fun` keyword line — use [`Symbol::decl_row`] for the actual declaration line.
     pub start_row: usize,
     /// 0-base inclusive end row (node.end_position().row — the row of the closing brace).
     pub end_row: usize,
+    /// 0-base row of the `@name` identifier — i.e. the actual `class Foo` / `fun bar` declaration
+    /// line, which sits BELOW any annotations (`@Component`) the definition node also spans.
+    pub decl_row: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +268,7 @@ pub fn extract(lang: Lang, source: &str) -> Result<Option<Vec<Symbol>>, EngineEr
         // this single match.
         let mut def_node = None;
         let mut name_text: Option<String> = None;
+        let mut name_row: Option<usize> = None;
 
         for cap in m.captures {
             let cap_name = query.capture_names()[cap.index as usize];
@@ -273,6 +279,7 @@ pub fn extract(lang: Lang, source: &str) -> Result<Option<Vec<Symbol>>, EngineEr
                 if let Ok(t) = cap.node.utf8_text(src_bytes) {
                     name_text = Some(t.to_string());
                 }
+                name_row = Some(cap.node.start_position().row);
             }
         }
 
@@ -283,6 +290,9 @@ pub fn extract(lang: Lang, source: &str) -> Result<Option<Vec<Symbol>>, EngineEr
                 name,
                 start_row: node.start_position().row,
                 end_row: node.end_position().row,
+                // The `@name` identifier's row is the real `class`/`fun` line (below annotations);
+                // fall back to the definition start only if no name was captured.
+                decl_row: name_row.unwrap_or_else(|| node.start_position().row),
             });
         }
     }
@@ -389,6 +399,9 @@ pub fn extract_with_refs(
                 name,
                 start_row: node.start_position().row,
                 end_row: node.end_position().row,
+                decl_row: name_node
+                    .map(|n| n.start_position().row)
+                    .unwrap_or_else(|| node.start_position().row),
             });
             continue;
         }

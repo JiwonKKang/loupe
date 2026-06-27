@@ -374,3 +374,77 @@ pub fn array_schema(item: Value) -> Value {
 pub fn string_schema() -> Value {
     json!({ "type": "string" })
 }
+
+/// AI — change-unit summaries (planning: 변경 단위 요약). Breaks a file card's diff into
+/// meaningful change units and summarizes each, WITH whole-file + cluster context so the
+/// summary reflects some codebase understanding (not just the isolated hunk).
+pub const CHANGE_UNITS_SYSTEM: &str = "\
+You split ONE file's code-review diff into meaningful CHANGE UNITS and summarize each. A change \
+unit = a group of changed lines a reviewer reads as ONE idea (e.g. 'limit the request body', \
+'propagate the context', 'label the metric'). The unit boundary is ONE REASON-FOR-CHANGE — the single 'why' you would write as one commit-message \
+bullet — NOT a method, symbol, field, or file. Edits that share one why are ONE unit, however many \
+methods / fields / call sites they touch: a field / dependency / type change AND every call site that \
+consumes it; the SAME transformation applied across several methods; a mechanical find-replace. Use \
+MORE than one unit ONLY when the diff genuinely carries DIFFERENT whys (e.g. a refactor AND a separate \
+bug-fix AND new validation) — one unit per why. Test every candidate split: could ALL of its edits be \
+justified by a SINGLE 'why'? If yes, keep it as one unit. LITMUS: if two candidate units would have \
+near-parallel titles differing only by a method / field name, they share one why — MERGE them and \
+title the why / pattern, never the location. Example — NOT two units 'startedBusRedisTemplate에서 \
+RedisTemplateFactory 주입' + 'routeNotificationRedisTemplate에서 RedisTemplateFactory 주입', but ONE \
+unit 'RedisTemplate 생성을 RedisTemplateFactory로 통일'. When unsure, MERGE.\n\
+\n\
+WORKED EXAMPLE — five changed lines spanning a field and THREE methods are ALL ONE unit. DIFF: \
+`- busRouteInfoClientMap: Map<ServiceRegion, BusRouteInfoClient>` becomes `+ busRouteInfoClients: \
+BusRouteInfoClients`; `- busRouteInfoClientMap[r]!!.getBusRealTimeInfo(i)` becomes `+ \
+busRouteInfoClients.forRegion(r).getBusRealTimeInfo(i)`; the SAME map-to-forRegion swap repeats in \
+getBusRouteOperationInfo and getBusPositions. RIGHT OUTPUT = EXACTLY ONE unit, title \
+'busRouteInfoClientMap을 BusRouteInfoClients로 교체' — it covers the field AND every method that adopts \
+forRegion(), because they share ONE why (encapsulate region->client selection). WRONG OUTPUT (the \
+mistake you MUST avoid) = one unit per method ('getRealTimeArrival에서 forRegion…', \
+'getBusRouteOperationInfo에서 forRegion…', 'getBusPositions에서 forRegion…').\n\
+\n\
+You are given the file's FULL new source (for \
+context), the DIFF (changed + nearby lines, each with its NEW-file line number), and the file's \
+cluster context (what larger change this file is part of). Use the full source + cluster to \
+understand WHY a change matters, not just what line moved.\n\
+\n\
+For EACH change unit return:\n\
+  - title: ONE very short Korean line — what this unit's change DOES (its intent). Keep code \
+identifiers (심볼명/타입명/필드명/메서드명) VERBATIM in 영문 원문, never translated.\n\
+  - why: 1–2 Korean sentences — WHY: what it enables, prevents, or fixes (grounded in the code).\n\
+  - tag: exactly ONE of: 안전, 로직, 관측, 계약, 리팩터, 설정, 테스트 (best fit).\n\
+  - startLine, endLine: the NEW-file line range this unit covers — REAL new-file line numbers \
+taken from the DIFF (not invented).\n\
+  - anchorLine: the SINGLE most important NEW-file line of this unit — the line a reviewer should \
+LAND ON. Pick the actual USAGE / behaviour the unit is about (the call site that consumes a new \
+dependency, the line whose logic changed), NOT an import/package line and NOT a bare \
+field/parameter declaration when a real usage exists. The summary bar attaches HERE. A real \
+new-file number from the DIFF, inside [startLine, endLine].\n\
+Also return:\n\
+  - summary: ONE Korean sentence for the WHOLE file card — its overall change intent.\n\
+\n\
+Hard rules: every MEANINGFUL changed hunk belongs to exactly one unit — BUT do NOT make a unit \
+for import / package / use statements on their own: an import is a mechanical consequence of the \
+real change, not something to review. Leave import-only lines OUTSIDE every unit (omit them), or \
+fold them into the unit they support; a unit must name a behavioural or structural change, never \
+'an import was added/removed'. Order units top→down by line; startLine/endLine must be actual \
+new-file numbers present in the DIFF; ground every title/why in the real code — never invent a \
+symbol, behaviour, or test. Output ONLY the JSON the schema defines.";
+
+/// Change-unit output schema: `{ summary, units: [{ title, why, tag(enum), startLine, endLine }] }`.
+pub fn change_units_output_schema() -> Value {
+    let tag = enum_schema(&["안전", "로직", "관측", "계약", "리팩터", "설정", "테스트"]);
+    let int = serde_json::json!({ "type": "integer" });
+    let unit = object_schema(&[
+        ("title", string_schema()),
+        ("why", string_schema()),
+        ("tag", tag),
+        ("startLine", int.clone()),
+        ("endLine", int.clone()),
+        ("anchorLine", int),
+    ]);
+    object_schema(&[
+        ("summary", string_schema()),
+        ("units", array_schema(unit)),
+    ])
+}

@@ -236,7 +236,11 @@ pub fn analyze_relations(
     changed.sort_by(|a, b| a.card_id.cmp(&b.card_id));
 
     let hints = relations::compute_relation_hints(&changed);
-    let all_ids: Vec<String> = changed.iter().map(|c| c.card_id.clone()).collect();
+    // File-level review: many changed symbols share one file card id. `changed` is sorted by
+    // card_id above, so dedup() collapses each file's symbols to a single whitelist entry — the
+    // cluster units are FILES (cross-file relations only; compute_relation_hints excluded self).
+    let mut all_ids: Vec<String> = changed.iter().map(|c| c.card_id.clone()).collect();
+    all_ids.dedup();
     let seeds = relations::seed_clusters(&all_ids, &hints);
 
     // Deterministic aggregate order (files were visited in diff order; sort defensively).
@@ -391,6 +395,7 @@ fn build_all_cluster_cards(
 /// keeps showing the Stage-1 flat cards); this function does not itself apply the ⑩ fallback.
 pub async fn analyze_review(
     provider: &dyn ai::LlmProvider,
+    token: &str,
     cache_dir: &std::path::Path,
     repo_path: &str,
     base: &str,
@@ -415,7 +420,115 @@ pub async fn analyze_review(
 
     fold_layout(&mut review, layout, shas);
 
+    // Review stage: per-card change-unit summaries, each with the file's FULL source + its cluster
+    // context (some codebase understanding, not just the isolated hunk). Best-effort — on failure a
+    // card simply has no units and the front-end falls back to the plain diff.
+    let _ = attach_change_units(provider, token, &mut review, repo_path, base, target).await;
+
     Ok(review)
+}
+
+/// Fan out one [`ai::steps::review_card_units`] per file card (concurrently), giving each the file's
+/// whole new source + its cluster title as context, and attach the returned change-units (+ a
+/// refined one-sentence summary) to the card. Best-effort: a failed/empty card keeps no units.
+async fn attach_change_units(
+    http: &dyn ai::LlmProvider,
+    token: &str,
+    review: &mut ReviewData,
+    repo_path: &str,
+    base: &str,
+    target: &str,
+) -> Result<(), EngineError> {
+    use futures_util::stream::{self, StreamExt};
+
+    // Per-card model routing for the change-unit (review) step — measured: a CLI call has a ~9s floor
+    // (Node start + Claude Code backend) so running all 29 cards through it is ~2 min:
+    //  - single changed symbol → **HTTP Haiku** (`http`): ~1s, and Haiku never over-splits ONE symbol.
+    //  - ≥2 changed symbols → **Sonnet via the `claude` CLI** (`cli`): only it reliably MERGES the same
+    //    edit repeated across methods into one unit (Haiku over-splits even shown the exact case).
+    //    Only the few multi-symbol cards pay the CLI cost. (Sonnet is CLI-only — HTTP 429s on it.)
+    let cli = ai::cli::CliProvider::new(token.to_string());
+
+    // The diff-render cards keep only the changed hunks; the unit reviewer wants the WHOLE file for
+    // context, so re-derive the sources (cheap — one more `git diff`).
+    let diff = gitdiff::diff_three_dot(repo_path, base, target)?;
+    let mut source_by_path: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for f in &diff {
+        source_by_path.insert(f.new_path.clone(), f.new_source.clone());
+    }
+    let cluster_title: std::collections::HashMap<&str, &str> =
+        review.clusters.iter().map(|c| (c.id.as_str(), c.title.as_str())).collect();
+
+    struct UnitJob { idx: usize, path: String, diff_text: String, source: String, ctx: String, complex: bool }
+    let mut jobs: Vec<UnitJob> = Vec::new();
+    for (idx, card) in review.cards.iter().enumerate() {
+        // Only the CHANGED lines go to the model (cards now carry the whole file for rendering; the
+        // unchanged bulk is the `full_source` arg, so sending every line here would just double it).
+        let diff_text: String = card
+            .lines
+            .iter()
+            .filter(|l| l.t == model::T_ADD || l.t == model::T_DEL)
+            .map(|l| {
+                let sign = if l.t == model::T_ADD { '+' } else { '-' };
+                format!("{} {}{}", l.n, sign, l.c)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if diff_text.is_empty() {
+            continue;
+        }
+        let source = source_by_path.get(&card.path).cloned().unwrap_or_default();
+        let ctx = card
+            .cluster_id
+            .as_deref()
+            .and_then(|cid| cluster_title.get(cid))
+            .map(|t| format!("이 파일은 '{t}' 변경의 일부입니다."))
+            .unwrap_or_default();
+        // Distinct symbols touched by the changes. ≥2 ⇒ "complex" ⇒ the over-split-prone case that
+        // needs Sonnet's grouping; otherwise Haiku is both fine and far faster.
+        let changed_syms: std::collections::BTreeSet<u32> = card
+            .lines
+            .iter()
+            .filter(|l| l.t == model::T_ADD || l.t == model::T_DEL)
+            .filter_map(|l| {
+                card.symbols
+                    .iter()
+                    .find(|s| l.n >= s.start_line && l.n <= s.end_line)
+                    .map(|s| s.start_line)
+            })
+            .collect();
+        let complex = changed_syms.len() >= 2;
+        jobs.push(UnitJob { idx, path: card.path.clone(), diff_text, source, ctx, complex });
+    }
+
+    // Borrow the CLI provider so every concurrent job shares it (the `async move` copies the
+    // reference, not the provider). Haiku jobs finish in ~1s; the few Sonnet jobs dominate, so a
+    // fan-out of 8 lets all the complex cards run at once without a swarm of `claude` subprocesses.
+    let cli = &cli;
+    let results: Vec<(usize, Option<String>, Vec<model::ChangeUnit>)> = stream::iter(jobs)
+        .map(|j| async move {
+            let (prov, tier): (&dyn ai::LlmProvider, ai::ModelTier) = if j.complex {
+                (cli as &dyn ai::LlmProvider, ai::ModelTier::Quality)
+            } else {
+                (http, ai::ModelTier::Fast)
+            };
+            let (summary, units) =
+                ai::steps::review_card_units(prov, tier, &j.path, &j.diff_text, &j.source, &j.ctx).await;
+            (j.idx, summary, units)
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    for (idx, summary, units) in results {
+        review.cards[idx].units = units;
+        if let Some(s) = summary {
+            if !s.trim().is_empty() {
+                review.cards[idx].ai_summary = Some(s);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Distinct changed-file count, for the loader's "Scanning the diff · N files" line. Counts

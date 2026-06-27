@@ -20,14 +20,15 @@
 //!   invariant (title/summary never empty) is guaranteed by `verify::verify_labels`, and
 //!   the M4 token check flags identifiers the AI may have invented.
 //!
-//! Every AI call uses **Sonnet (Quality) via the `claude` CLI (`ai::cli::CliProvider`) +
-//! temperature=0**. The *direct* Messages API returns HTTP 429 on Sonnet (only Haiku is
-//! reachable that way), but the `claude` CLI routes through the Claude Code backend and
-//! reaches Sonnet on the same setup-token — so the pipeline runs on Sonnet for分류·정렬·요약
-//! 품질·결정성, with temp=0 reinforcing 재현성. On a verification failure a step **retries
-//! once**; a second failure is `Err` so the orchestrator can fall back. (The provider is
-//! injected — these functions only set `ModelTier::Quality`; the orchestrator wires the
-//! concrete `CliProvider`.)
+//! Every analysis AI call (cluster+order **and** labels) runs on **Haiku (Fast) via the
+//! direct HTTP Messages API (`ai::anthropic::OAuthProvider`) + temperature=0**. The direct
+//! API returns HTTP 429 on Sonnet (only Haiku is reachable that way), so HTTP = Haiku-only;
+//! Haiku's cluster+order quality was verified comparable to Sonnet (multi-case, Sonnet-judged),
+//! and HTTP is ~10x faster than routing Sonnet through the `claude` CLI (no subprocess /
+//! cold-start). temp=0 keeps 재현성. On a verification failure a step **retries once**; a
+//! second failure is `Err` so the orchestrator can fall back. (The provider is injected;
+//! the orchestrator wires the concrete `OAuthProvider`. The `claude` CLI / Sonnet path now
+//! survives ONLY for the agentic thread Q&A — `ai::cli::ask_agentic`.)
 
 use super::prompts::{
     cluster_and_order_output_schema, cluster_output_schema, label_output_schema,
@@ -483,8 +484,11 @@ pub async fn cluster_and_order_combined(
     let mut last_err: Option<LlmError> = None;
     for _attempt in 0..2 {
         let req = CompletionRequest {
-            // Quality(Sonnet) via CliProvider — 소형 PR 결합 호출도 Sonnet.
-            tier: ModelTier::Quality,
+            // Fast(Haiku) via the direct HTTP Messages API (OAuthProvider): the whole
+            // analysis pipeline runs on Haiku-HTTP — ~10x faster than the `claude` CLI
+            // (no subprocess / cold-start), Sonnet 429s on the direct API, and Haiku's
+            // cluster+order quality was verified comparable (multi-case, Sonnet-judged).
+            tier: ModelTier::Fast,
             system: CLUSTER_AND_ORDER_SYSTEM.to_string(),
             user: user.clone(),
             max_tokens: COMBINED_MAX_TOKENS,
@@ -764,3 +768,84 @@ fn backfill_missing_labels(mut labels: LabelResult, inputs: &[LabelInput]) -> La
 #[cfg(test)]
 #[path = "steps_tests.rs"]
 mod tests;
+
+// ===========================================================================
+// Change-unit summaries (review stage) — per CARD, with whole-file + cluster context.
+// ===========================================================================
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeUnitOut {
+    title: String,
+    why: String,
+    tag: String,
+    start_line: u32,
+    end_line: u32,
+    #[serde(default)]
+    anchor_line: u32,
+}
+#[derive(serde::Deserialize)]
+struct ChangeUnitsOut {
+    summary: String,
+    units: Vec<ChangeUnitOut>,
+}
+
+/// Review ONE file card into change-unit summaries (planning: 변경 단위 요약), giving the model
+/// the file's FULL source + its cluster context so the summary reflects some codebase
+/// understanding. **Fast (Haiku) via the injected provider** + temperature=0. Never errors: on a
+/// transport/parse failure it returns `(None, [])` so a single flaky card can't sink the pipeline.
+pub async fn review_card_units(
+    provider: &dyn LlmProvider,
+    tier: ModelTier,
+    path: &str,
+    diff_text: &str,
+    full_source: &str,
+    cluster_ctx: &str,
+) -> (Option<String>, Vec<crate::engine::model::ChangeUnit>) {
+    use super::prompts::{change_units_output_schema, CHANGE_UNITS_SYSTEM};
+    let user = serde_json::json!({
+        "path": path,
+        "clusterContext": cluster_ctx,
+        "fullSource": full_source,
+        "diff": diff_text,
+    })
+    .to_string();
+    let schema = change_units_output_schema();
+    for _attempt in 0..2 {
+        let req = CompletionRequest {
+            tier,
+            system: CHANGE_UNITS_SYSTEM.to_string(),
+            user: user.clone(),
+            max_tokens: 4096,
+            json_schema: Some(schema.clone()),
+            temperature: 0.0,
+        };
+        if let Ok(resp) = provider.complete(req).await {
+            if let Ok(parsed) = serde_json::from_value::<ChangeUnitsOut>(resp.json.clone()) {
+                let units = parsed
+                    .units
+                    .into_iter()
+                    .map(|u| {
+                        // Anchor falls back to the unit's start when the model omits it or returns
+                        // an out-of-range line, so the bar always has a valid attach point.
+                        let anchor = if u.anchor_line >= u.start_line && u.anchor_line <= u.end_line {
+                            u.anchor_line
+                        } else {
+                            u.start_line
+                        };
+                        crate::engine::model::ChangeUnit {
+                            title: u.title,
+                            why: u.why,
+                            tag: u.tag,
+                            start_line: u.start_line,
+                            end_line: u.end_line,
+                            anchor_line: anchor,
+                        }
+                    })
+                    .collect();
+                return (Some(parsed.summary), units);
+            }
+        }
+    }
+    (None, Vec::new())
+}

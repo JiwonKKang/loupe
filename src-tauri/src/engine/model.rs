@@ -84,6 +84,57 @@ pub struct ReviewCard {
     pub change_type: ChangeType,
     /// [new] AI semantic summary, separate from the statistical `summary` (B1 split).
     pub ai_summary: Option<String>,
+    /// [new] The symbols (functions / classes) present in this file card, with their
+    /// new-file line ranges. Lets the front-end fold unchanged regions WITHOUT hiding the
+    /// enclosing function/class declaration — a change inside `fun foo()` keeps the `fun foo`
+    /// header visible (git-style scope context). Empty for unsupported / unparsed files.
+    pub symbols: Vec<CardSymbol>,
+    /// [new] AI-produced **change-unit summaries** — the card's diff broken into meaningful
+    /// units, each with a one-line title (what), a why (rationale), a tag (category), and the
+    /// new-file line range it covers. The front-end renders a summary bar per unit interleaved
+    /// with the diff. Empty until the review (label) stage fills it.
+    pub units: Vec<ChangeUnit>,
+}
+
+/// One AI-summarized change unit inside a card (planning: change-unit summaries). The diff
+/// rows whose new-file line ∈ [start_line, end_line] belong to this unit.
+#[derive(Serialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeUnit {
+    /// One-line summary of WHAT this unit's change does (Korean, identifiers verbatim).
+    pub title: String,
+    /// 1–2 sentences on WHY (the rationale), shown when the unit is expanded.
+    pub why: String,
+    /// Short category label (예: 안전 / 로직 / 관측 / 리팩터). Drives the right-side tag pill.
+    pub tag: String,
+    /// 1-based NEW-file line range (matches `ReviewLine.n`) the unit covers.
+    pub start_line: u32,
+    pub end_line: u32,
+    /// 1-based NEW-file line the summary bar ATTACHES to — the unit's single most important changed
+    /// line (the usage / behaviour the unit is about, e.g. the call site that consumes a new
+    /// dependency), NOT an import or a mechanical line. **The AI decides this**, so bar placement is
+    /// a semantic call rather than a front-end "first changed line" heuristic; the front-end renders
+    /// the bar at this line. Inside `[start_line, end_line]`.
+    pub anchor_line: u32,
+}
+
+/// A symbol (function / class) inside a file card, for scope-aware folding. `start_line`
+/// and `end_line` are 1-based NEW-file line numbers (matching `ReviewLine.n`), so the
+/// front-end can tell which line is a declaration and which symbol encloses a change.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CardSymbol {
+    pub name: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// The declaration (signature) line's TEXT, trimmed — e.g. `fun appendRoutes(...) {`. Lets the
+    /// front-end pin the real enclosing function/class line above a change even when that line falls
+    /// outside the diff's hunk context (so a deep change still shows its actual header line). This is
+    /// the `class`/`fun` line itself (below any annotations), NOT `start_line`.
+    pub decl: String,
+    /// 1-based NEW-file line of [`Self::decl`] (the `class`/`fun` line). Lets the front-end skip the
+    /// pinned header when that line is already visible in the diff, or is the change itself.
+    pub decl_line: u32,
 }
 
 /// One rendered diff line.

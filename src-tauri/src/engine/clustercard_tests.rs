@@ -32,6 +32,8 @@ fn card(id: &str, symbol: &str, path: &str, kind: SymbolKind, ct: ChangeType) ->
         qualified: symbol.to_string(),
         change_type: ct,
         ai_summary: None,
+        symbols: Vec::new(),
+        units: Vec::new(),
     }
 }
 
@@ -418,6 +420,8 @@ fn file_card(path: &str, ct: ChangeType) -> ReviewCard {
         qualified: path.into(),
         change_type: ct,
         ai_summary: None,
+        symbols: Vec::new(),
+        units: Vec::new(),
     }
 }
 

@@ -249,7 +249,9 @@ async fn verify_token(token: String) -> Result<(), String> {
 
     let token = validate_token(&token)?;
 
-    let provider = engine::ai::cli::CliProvider::new(token);
+    // Verify against the SAME path the analysis pipeline uses — Haiku via the direct HTTP
+    // Messages API (OAuthProvider). Fast tier ⇒ Haiku (Sonnet would 429 on the direct API).
+    let provider = engine::ai::anthropic::OAuthProvider::new(token);
 
     let req = CompletionRequest {
         system: "reply with OK".to_string(),
@@ -414,14 +416,16 @@ async fn analyze_review(
     // <app_data_dir>/loupe (created on demand by the cache layer).
     let cache_dir = loupe_dir(&app)?;
 
-    // CliProvider holds the setup-token (Sonnet via the `claude` CLI). `token` is moved in and
-    // never logged. The trait object is what the engine consumes.
-    let provider = engine::ai::cli::CliProvider::new(token);
+    // Cluster + order + labels run on Haiku via the direct HTTP Messages API (OAuthProvider):
+    // ~10x faster than the `claude` CLI. The change-unit (review) step instead runs on Sonnet via
+    // the CLI — its grouping needs the stronger model — so the same `token` is also passed through
+    // for `analyze_review` to build a `CliProvider`. Never logged (providers pass it via env/once).
+    let provider = engine::ai::anthropic::OAuthProvider::new(token.clone());
 
     // Stream pipeline milestones to the loader over `analyze://progress`.
     let progress = TauriProgress(app.clone());
 
-    engine::analyze_review(&provider, &cache_dir, &repo_path, &base, &target, &progress)
+    engine::analyze_review(&provider, &token, &cache_dir, &repo_path, &base, &target, &progress)
         .await
         .map_err(|e| e.to_string())
 }

@@ -216,11 +216,11 @@ async fn small_pr_takes_combined_branch_then_labels() {
 
     // 1 cluster ⇒ combined(1) + per-cluster label(1) = 1+N = 2 calls.
     assert_eq!(provider.call_count(), 2, "small PR (1 cluster) ⇒ combined(1) + label(1) = 2 calls");
-    // 콜1 = combined on Quality(Sonnet), 콜2 = label on Fast(Haiku). One cluster ⇒ exactly that order.
+    // 콜1 = combined on Fast(Haiku, via HTTP), 콜2 = label on Fast(Haiku). One cluster ⇒ that order.
     assert_eq!(
         provider.tiers(),
-        vec![ModelTier::Quality, ModelTier::Fast],
-        "콜1 combined on Quality, 콜2 label on Fast"
+        vec![ModelTier::Fast, ModelTier::Fast],
+        "콜1 combined on Fast(Haiku), 콜2 label on Fast"
     );
     assert_eq!(
         provider.label_tiers(),
@@ -281,11 +281,11 @@ async fn medium_pr_still_combined_and_orders_across_clusters() {
         3,
         "medium PR (2 clusters) ⇒ combined(1) + per-cluster label(2) = 1+N = 3 calls"
     );
-    // 콜1 = combined on Quality (awaited before the label fan-out, so deterministically first);
+    // 콜1 = combined on Fast(Haiku) (awaited before the label fan-out, so deterministically first);
     // 콜2..N+1 = one label per cluster, all on Fast (concurrent — only their tier, not order, is
-    // asserted). The whole label fan-out is Fast/Haiku.
+    // asserted). The whole pipeline is Fast/Haiku, via the direct HTTP API.
     let tiers = provider.tiers();
-    assert_eq!(tiers[0], ModelTier::Quality, "콜1 combined on Quality (runs before the label fan-out)");
+    assert_eq!(tiers[0], ModelTier::Fast, "콜1 combined on Fast(Haiku) (runs before the label fan-out)");
     assert_eq!(
         provider.label_tiers(),
         vec![ModelTier::Fast, ModelTier::Fast],
@@ -345,8 +345,8 @@ async fn large_pr_still_takes_combined_path_in_two_calls() {
     );
     assert_eq!(
         provider.tiers(),
-        vec![ModelTier::Quality, ModelTier::Fast],
-        "콜1 combined on Quality, 콜2 label on Fast — even for a large PR"
+        vec![ModelTier::Fast, ModelTier::Fast],
+        "콜1 combined on Fast(Haiku), 콜2 label on Fast — even for a large PR"
     );
     assert_eq!(layout.clusters.len(), 1);
     assert_eq!(layout.ordered_card_ids.len(), 49, "every changed symbol appears once");

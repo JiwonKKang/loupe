@@ -339,12 +339,16 @@ export default function ReviewScreen(props) {
   // a thin "⋯ N unchanged lines" divider the reviewer can expand. Font stays
   // large; only the changes (the point of the card) compete for the eye.
   const [expanded, setExpanded] = React.useState(() => new Set());
+  // Which change-units have their "why" (rationale) revealed. Collapsed by default (design B).
+  const [unitOpen, setUnitOpen] = React.useState(() => new Set());
+  const toggleUnit = (u) => setUnitOpen((s) => { const n = new Set(s); n.has(u) ? n.delete(u) : n.add(u); return n; });
   // Header path starts collapsed (first/last segments) on every card; click expands.
   const [pathFull, setPathFull] = React.useState(false);
   const [passHover, setPassHover] = React.useState(false); // "Passed" badge → "패스 취소" on hover
-  React.useEffect(() => { setExpanded(new Set()); setPathFull(false); }, [card.id]);
+  React.useEffect(() => { setExpanded(new Set()); setUnitOpen(new Set()); setPathFull(false); }, [card.id]);
   const CONTEXT = 2;
   const display = React.useMemo(() => {
+    const lineOf = (row) => (row ? (row.right && row.right.n) || (row.left && row.left.n) : null);
     const items = []; const N = rows.length; let i = 0;
     const hasThread = (a, b) => { for (let k = a; k < b; k++) if (threadByRow[k]) return true; return false; };
     while (i < N) {
@@ -353,7 +357,10 @@ export default function ReviewScreen(props) {
       const runLen = j - i;
       const keepTop = i === 0 ? 0 : CONTEXT;
       const keepBottom = j === N ? 0 : CONTEXT;
-      if (expanded.has(i) || hasThread(i, j) || runLen <= keepTop + keepBottom + 1) {
+      // Cards now hold the WHOLE file, so most unchanged runs are long — fold them. But don't fold a
+      // run that would only hide a few lines (≥4 hidden to be worth a fold), so small gaps between
+      // nearby changes stay open instead of becoming noisy little "⋯ 2 lines" folds.
+      if (expanded.has(i) || hasThread(i, j) || runLen - keepTop - keepBottom < 4) {
         for (let k = i; k < j; k++) items.push({ type: 'row', r: k, row: rows[k] });
       } else {
         for (let k = i; k < i + keepTop; k++) items.push({ type: 'row', r: k, row: rows[k] });
@@ -362,8 +369,27 @@ export default function ReviewScreen(props) {
       }
       i = j;
     }
-    return items;
-  }, [rows, expanded, threadByRow]);
+
+    // Change-unit summary bars (변경 단위 요약): drop each unit's bar before the first rendered row
+    // at/after its AI-chosen `anchorLine`. No units → plain diff (backward-compatible).
+    const units = card.units || [];
+    if (!units.length) return items;
+    const anchored = units
+      .map((u, i) => ({ i, u, a: u.anchorLine || u.startLine }))
+      .filter((x) => x.a)
+      .sort((p, q) => p.a - q.a);
+    const withBars = []; let ptr = 0;
+    for (const it of items) {
+      if (it.type === 'row') {
+        const ln = lineOf(it.row);
+        while (ptr < anchored.length && ln != null && ln >= anchored[ptr].a) {
+          withBars.push({ type: 'unit', u: anchored[ptr].i, unit: anchored[ptr].u }); ptr++;
+        }
+      }
+      withBars.push(it);
+    }
+    return withBars;
+  }, [rows, expanded, threadByRow, card.units]);
 
   // Adaptive code size: a brand-new function is all additions (nothing to
   // fold), so scale the font to how many rows actually show — fewer rows get
@@ -1042,6 +1068,47 @@ export default function ReviewScreen(props) {
               <div style={{ height: topPad, background: 'var(--surface-inset)' }} />
               {display.slice(startIdx, endIdx).map((item, li) => {
                 const gi = startIdx + li; // global index into `display` (for measurement)
+                if (item.type === 'unit') {
+                  // Change-unit summary bar (design B): dot · title · tag · chevron + collapsible
+                  // "why". It hugs ONE split side — 'after' (right half) for adds/modifications,
+                  // 'before' (left half) for delete-only units — so the bar sits over the column
+                  // that actually changed instead of spanning the full width. The other half is an
+                  // empty spacer; the bar's inner border lines up with the split's center divider.
+                  const isOpen = unitOpen.has(item.u);
+                  const marker = isOpen ? 'var(--accent-hover)' : 'var(--accent)';
+                  return (
+                    <div key={'unit-' + item.u} ref={measure(gi)}>
+                      <button onClick={() => toggleUnit(item.u)}
+                        style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center', width: '100%', padding: '6px 16px',
+                          background: isOpen ? 'var(--accent-dim)' : 'rgba(255,255,255,0.022)', border: 'none',
+                          borderTop: '1px solid var(--border-subtle)', borderBottom: '1px solid var(--border-subtle)',
+                          cursor: 'pointer', transition: 'var(--t-hover)' }}
+                        onMouseEnter={(e) => { if (!isOpen) e.currentTarget.style.background = 'rgba(255,255,255,0.045)'; }}
+                        onMouseLeave={(e) => { if (!isOpen) e.currentTarget.style.background = 'rgba(255,255,255,0.022)'; }}>
+                        {/* left spacer balances the right-side meta so the title sits truly centered */}
+                        <span aria-hidden />
+                        <span style={{ display: 'inline-flex', alignItems: 'center', justifySelf: 'center', gap: 9, minWidth: 0 }}>
+                          <span style={{ flex: 'none', width: 6, height: 6, borderRadius: '50%', background: marker, transition: 'background var(--dur-fast) var(--ease-soft)' }} />
+                          <span style={{ minWidth: 0, font: 'var(--weight-medium) 12.5px/1.4 var(--font-ui)', color: isOpen ? 'var(--text-primary)' : 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.unit.title}</span>
+                        </span>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', justifySelf: 'end', gap: 9 }}>
+                          {item.unit.tag && (
+                            <span style={{ flex: 'none', font: 'var(--weight-medium) 10.5px/1 var(--font-ui)', letterSpacing: 'var(--tracking-wide)',
+                              color: 'var(--text-tertiary)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-pill)', padding: '3px 8px', whiteSpace: 'nowrap' }}>{item.unit.tag}</span>
+                          )}
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={isOpen ? 'var(--accent)' : 'var(--text-faint)'} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"
+                            style={{ flex: 'none', transform: isOpen ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-soft)' }}><path d="M6 9l6 6 6-6" /></svg>
+                        </span>
+                      </button>
+                      {isOpen && item.unit.why && (
+                        <div style={{ display: 'flex', gap: 10, padding: '11px 18px 13px 26px', background: 'var(--bg-base)', borderBottom: '1px solid var(--border-subtle)' }}>
+                          <span style={{ flex: 'none', width: 2, alignSelf: 'stretch', borderRadius: 2, background: 'var(--accent-line)' }} />
+                          <div style={{ font: 'var(--weight-regular) 12.5px/1.55 var(--font-ui)', color: 'var(--text-tertiary)', textWrap: 'pretty' }}>{item.unit.why}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
                 if (item.type === 'fold') {
                   return (
                     <div key={'fold-' + item.key} ref={measure(gi)} onClick={() => setExpanded((s) => new Set(s).add(item.key))}

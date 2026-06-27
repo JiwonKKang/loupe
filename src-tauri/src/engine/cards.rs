@@ -14,7 +14,7 @@
 //!     empty symbol slice).
 
 use super::gitdiff::{DiffLine, FileDiff, FileStatus, LineKind};
-use super::model::{ChangeType, ReviewCard, ReviewLine, SymbolKind, T_ADD, T_CTX, T_DEL};
+use super::model::{CardSymbol, ChangeType, ReviewCard, ReviewLine, SymbolKind, T_ADD, T_CTX, T_DEL};
 use super::symbols::Symbol;
 use std::collections::BTreeMap;
 
@@ -36,66 +36,20 @@ pub fn build_file_cards(file: &FileDiff, symbols: &[Symbol], out: &mut Vec<Revie
 
     // M13: a brand-new file is always read top-to-bottom as one card.
     if file.status == FileStatus::Added {
-        out.push(whole_file_card(file));
+        out.push(whole_file_card(file, symbols));
         return;
     }
 
-    // Attribute each diff line (not hunk — M10) to its innermost symbol. ctx lines
-    // are attributed too (so a symbol card can render leading/trailing context), and
-    // del lines anchor to the preceding ctx line's new coordinate (M9).
-    let attribution = attribute_changes(&file.lines, symbols);
-
-    // Which symbols actually have a *change*? A symbol is "changed" only if an add or
-    // del line is attributed to it — never on ctx alone. git diff emits context_lines
-    // (3) around every hunk, so an unchanged symbol adjacent to a real change would
-    // otherwise be attributed via those ctx lines and become a spurious "+0 −0" card.
-    // ctx still rides along as display context inside a genuinely-changed symbol's
-    // card, it just never grants card-worthiness on its own (core invariant).
-    let mut changed_symbol_idxs: Vec<usize> = attribution
-        .iter()
-        .zip(file.lines.iter())
-        .filter_map(|(a, l)| match (a, l.kind) {
-            (Some(idx), LineKind::Add | LineKind::Del) => Some(*idx),
-            _ => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    changed_symbol_idxs.sort_by_key(|&i| symbols[i].start_row);
-
-    let has_orphan_change = attribution
-        .iter()
-        .zip(file.lines.iter())
-        .any(|(a, l)| a.is_none() && l.kind != LineKind::Ctx);
-
-    // Simple split rule: >= 2 changed symbols => per-symbol cards + orphan file card.
-    if changed_symbol_idxs.len() >= 2 {
-        // Track id suffixes by qualified name using a STABLE key (start_row) so a
-        // later re-ordering cannot change a card's id (M3).
-        let dup_counts = duplicate_name_counts(symbols, &changed_symbol_idxs);
-
-        for &sym_idx in &changed_symbol_idxs {
-            let sym = &symbols[sym_idx];
-            // M11: a symbol whose changes fall into hunks separated by a gap (git
-            // omitted the unchanged middle) becomes one card per contiguous run so
-            // the gutter never jumps (B2). A single-run symbol keeps its plain id.
-            push_symbol_cards(file, sym, sym_idx, &attribution, &dup_counts, out);
-        }
-        if has_orphan_change {
-            out.push(orphan_file_card(file, &attribution));
-        }
-        return;
-    }
-
-    // 0 or 1 changed symbols => one whole-file card. Defensive: git only emits files
-    // that actually changed, but never emit a "+0 −0" whole-file card if (somehow) the
-    // file carries only ctx lines — the no-empty-change-card invariant holds here too.
+    // A modified file is reviewed as ONE file-level card (no per-symbol split). The whole file's
+    // diff is the card; the AI clusters and orders FILES by data flow, and the card carries its
+    // symbols (via `whole_file_card`) so the front-end can fold unchanged regions WITHOUT hiding
+    // the enclosing function/class declaration. Never emit a "+0 −0" card (no-empty-card invariant).
     let file_has_change = file
         .lines
         .iter()
         .any(|l| matches!(l.kind, LineKind::Add | LineKind::Del));
     if file_has_change {
-        out.push(whole_file_card(file));
+        out.push(whole_file_card(file, symbols));
     }
 }
 
@@ -139,12 +93,15 @@ pub fn changed_symbols_for_relations(file: &FileDiff, symbols: &[Symbol]) -> Vec
         .collect();
     changed_symbol_idxs.sort_by_key(|&i| symbols[i].start_row);
 
-    let dup_counts = duplicate_name_counts(symbols, &changed_symbol_idxs);
+    // File-level review: every changed symbol maps to its FILE's card id. The relation layer
+    // then aggregates to cross-file data flow — `compute_relation_hints` excludes self-pairs, so
+    // same-file symbol relations collapse — and the cluster member ids match the file cards.
+    let file_card = file_id(&file.new_path);
     changed_symbol_idxs
         .into_iter()
         .map(|sym_idx| ChangedSymbolRef {
             sym_idx,
-            card_id: stable_symbol_id(file, &symbols[sym_idx], &dup_counts),
+            card_id: file_card.clone(),
         })
         .collect()
 }
@@ -390,11 +347,30 @@ fn render_lines(lines: &[DiffLine]) -> Vec<ReviewLine> {
 }
 
 /// Whole-file card: all changed lines + their context, single card.
-fn whole_file_card(file: &FileDiff) -> ReviewCard {
+fn whole_file_card(file: &FileDiff, symbols: &[Symbol]) -> ReviewCard {
     let lines = render_lines(&file.lines);
     let (adds, dels) = count_add_del(&lines);
     let summary = file_summary(&file.new_path, file.status, adds, dels);
     let name = basename(&file.new_path);
+    // Carry the file's symbols (name + 1-based new-file line range) so the front-end can fold
+    // unchanged regions while keeping each change's enclosing function/class declaration visible.
+    let src_lines: Vec<&str> = file.new_source.lines().collect();
+    let card_symbols: Vec<CardSymbol> = symbols
+        .iter()
+        .map(|s| CardSymbol {
+            name: s.name.clone(),
+            start_line: (s.start_row as u32).saturating_add(1),
+            end_line: (s.end_row as u32).saturating_add(1),
+            // The signature line's text (trimmed) at the `class`/`fun` line (`decl_row`, below any
+            // annotations), so the front-end can pin the real declaration above a change even when
+            // it's outside the diff's hunk context.
+            decl: src_lines
+                .get(s.decl_row)
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default(),
+            decl_line: (s.decl_row as u32).saturating_add(1),
+        })
+        .collect();
     ReviewCard {
         id: file_id(&file.new_path),
         chapter: name.clone(),
@@ -406,12 +382,52 @@ fn whole_file_card(file: &FileDiff) -> ReviewCard {
         qualified: name,
         change_type: file_change_type(file.status),
         kind: SymbolKind::File,
+        symbols: card_symbols,
         ..Default::default()
     }
 }
 
 /// File-level card for changes that fell outside any symbol (M4 orphan), when the
 /// file was otherwise split per-symbol.
+/// True when an outside-every-symbol changed line is a low-signal **import / package /
+/// module** statement that must not, on its own, spawn a separate orphan card. NOT
+/// JVM-only — this is language-agnostic, covering every language's top-of-file module
+/// matter:
+///   - Java / Kotlin:  `import …`, `package …`
+///   - Rust:           `use …`, `pub use …`, `pub(crate) use …`, `extern crate …`
+///   - Go:             `import …`, `package …`, grouped-import members (bare `"path"`)
+///   - Python:         `import …`, `from … import …`
+///   - C / C++:        `#include …`
+///   - C#:             `using …`, `namespace …`
+///   - Ruby:           `require …`, `require_relative …`
+///   - Swift / TS / JS: `import …`
+/// (Today only the symbol-parsed languages — Go/Java/Kotlin/Rust — actually reach the
+/// orphan-card branch; the rest get one whole-file card anyway. The broad set future-proofs
+/// the moment any of them gains symbol parsing.)
+/// Deliberately conservative: anything with `=` (a top-level const/val with a string
+/// initializer) is NOT treated as an import, so real top-level changes still card.
+fn is_import_like(content: &str) -> bool {
+    let t = content.trim();
+    // Reduce a leading visibility modifier so `pub use` / `pub(crate) use` match the keyword.
+    let kw = t
+        .strip_prefix("pub(crate) ")
+        .or_else(|| t.strip_prefix("pub "))
+        .unwrap_or(t);
+    kw.starts_with("import ")
+        || kw.starts_with("import\t")
+        || kw.starts_with("package ")
+        || kw.starts_with("use ")
+        || kw.starts_with("extern crate ")
+        || kw.starts_with("using ")
+        || kw.starts_with("namespace ")
+        || kw.starts_with("#include")
+        || kw.starts_with("require ")
+        || kw.starts_with("require_relative ")
+        || (kw.starts_with("from ") && kw.contains(" import ")) // Python `from x import y`
+        // Go grouped-import member: a (optionally aliased) bare quoted path — `"a/b"` / `m "a/b"`.
+        || (t.ends_with('"') && t.matches('"').count() == 2 && !t.contains('=') && !t.contains("//"))
+}
+
 fn orphan_file_card(file: &FileDiff, attribution: &[Option<usize>]) -> ReviewCard {
     let orphan_lines: Vec<DiffLine> = file
         .lines
